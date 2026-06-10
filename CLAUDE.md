@@ -792,8 +792,9 @@ the original + drops a job file in `/Volumes/Media/lda-transcode-cache/jobs/`;
 a launchd helper on the M4 (`host-tools/transcode-helper.mjs`) runs
 `ffmpeg -c:v h264_videotoolbox` and writes the result back.
 
-**The helper must be running for remote conversions to complete** (home
-conversions don't use it). One-time install on the M4:
+**The helper must be running for conversions to complete** — all
+conversions (home + remote) download the original then encode on the host
+via the helper. One-time install on the M4:
 
 ```bash
 cp host-tools/com.parker.lda-transcode-helper.plist ~/Library/LaunchAgents/

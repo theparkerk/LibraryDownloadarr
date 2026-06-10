@@ -476,12 +476,13 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
       // Friendly title: "Show - SxxExx - Episode" for episodes; plain title otherwise
       const jobTitle = buildJobTitle(metadata);
 
-      // Remote servers encode locally on the M4 from the original file (the
-      // live remote transcode session is too fragile across the internet).
-      // Require partKey to be a plain Plex path ("/library/parts/…") so it
-      // can't inject a URL authority when concatenated after the server URL.
+      // All conversions (home + remote) download the original and encode on
+      // the M4's hardware (VideoToolbox) via the host helper — ~4x faster than
+      // Plex's software transcode and off the CPU. For home the original read
+      // is local/fast. Require partKey to be a plain Plex path ("/library/…")
+      // so it can't inject a URL authority when concatenated after serverUrl.
       const partKey = metadata.Media?.[0]?.Part?.[0]?.key;
-      const localEncode = !isHome && typeof partKey === 'string' && partKey.startsWith('/library/');
+      const localEncode = typeof partKey === 'string' && partKey.startsWith('/library/');
 
       const job = db.createTranscodeJob({
         userId: req.user!.id,
