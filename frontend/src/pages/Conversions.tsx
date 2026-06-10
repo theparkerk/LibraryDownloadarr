@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
 import { api, TranscodeJobView } from '../services/api';
-import { useConversionsStore } from '../stores/conversionsStore';
+import { useConversionsStore, refreshConversions } from '../stores/conversionsStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 
 const fmtEta = (sec: number | null): string => {
@@ -40,10 +40,22 @@ export const Conversions: React.FC = () => {
     }
   };
 
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const retry = async (job: TranscodeJobView) => {
+    setRetryingId(job.id);
+    try {
+      await api.startTranscode(job.ratingKey, job.quality, job.serverId, job.subtitles);
+      refreshConversions();
+    } finally {
+      setTimeout(() => setRetryingId(null), 3000);
+    }
+  };
+
   const processing = jobs.filter((j) => j.status === 'processing');
   const queued = jobs.filter((j) => j.status === 'queued').sort((a, b) => (a.queuePosition || 0) - (b.queuePosition || 0));
   const ready = jobs.filter((j) => j.status === 'ready');
-  const failed = jobs.filter((j) => j.status === 'failed' || j.status === 'canceled');
+  // 'expired' = ready job whose file was swept; offer a re-convert like failures
+  const failed = jobs.filter((j) => j.status === 'failed' || j.status === 'canceled' || j.status === 'expired');
 
   const Row: React.FC<{ job: TranscodeJobView; children?: React.ReactNode; sub?: string }> = ({ job, children, sub }) => (
     <div className="card p-3 md:p-4 flex items-center justify-between gap-3">
@@ -144,11 +156,23 @@ export const Conversions: React.FC = () => {
 
           {failed.length > 0 && (
             <section className="mb-6">
-              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">Failed</h2>
+              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                Failed / expired
+              </h2>
               <div className="space-y-2">
                 {failed.map((job) => (
-                  <Row key={job.id} job={job} sub={job.error || job.status}>
-                    <span className="text-xs text-red-400">✗</span>
+                  <Row
+                    key={job.id}
+                    job={job}
+                    sub={job.status === 'expired' ? 'Expired — file removed after 24h' : job.error || job.status}
+                  >
+                    <button
+                      onClick={() => retry(job)}
+                      disabled={retryingId === job.id}
+                      className="btn-secondary text-sm disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {retryingId === job.id ? 'Starting…' : '↻ Try again'}
+                    </button>
                   </Row>
                 ))}
               </div>

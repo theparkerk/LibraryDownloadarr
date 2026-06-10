@@ -22,8 +22,9 @@ export const config = {
     // Software transcode is heavy; one at a time by default
     maxConcurrent: parseInt(process.env.TRANSCODE_MAX_CONCURRENT || '1', 10),
     maxQueue: parseInt(process.env.TRANSCODE_MAX_QUEUE || '10', 10),
-    // A ready file is deleted this long after it became ready (and on download)
-    fileTtlMs: parseInt(process.env.TRANSCODE_FILE_TTL_MS || `${6 * 60 * 60 * 1000}`, 10),
+    // A ready converted file is kept this long (on our server) before the
+    // hourly sweep deletes it + its job row. 24h by default.
+    fileTtlMs: parseInt(process.env.TRANSCODE_FILE_TTL_MS || `${24 * 60 * 60 * 1000}`, 10),
     // Kill a job whose ffmpeg makes no progress for this long (stalled session)
     stallTimeoutMs: parseInt(process.env.TRANSCODE_STALL_MS || `${5 * 60 * 1000}`, 10),
   },

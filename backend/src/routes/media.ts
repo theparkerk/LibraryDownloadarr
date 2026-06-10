@@ -519,12 +519,20 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
           const aheadTime = queuedAsc.slice(0, idx).reduce((sum, q) => sum + (fullEstimate(q) || 0), 0);
           etaSec = processingRemaining + aheadTime + (fullEstimate(j) || 0);
         }
+        // A ready job whose file is gone (TTL sweep races, or removed) should
+        // read as 'expired' so the panel offers a re-convert instead of a
+        // dead Download button.
+        let status: string = j.status;
+        if (j.status === 'ready' && (!j.outputPath || !fs.existsSync(j.outputPath))) {
+          status = 'expired';
+        }
         return {
           id: j.id,
+          ratingKey: j.ratingKey, // for "Try again"
           title: j.title,
           quality: j.quality,
           serverId: j.serverId,
-          status: j.status,
+          status,
           progress: j.progress,
           fileSize: j.fileSize,
           error: j.error,

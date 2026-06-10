@@ -13,10 +13,11 @@ import {
 // A conversion job as shown in the Conversions panel.
 export interface TranscodeJobView {
   id: string;
+  ratingKey: string;
   title: string;
   quality: string;
   serverId?: string;
-  status: 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
+  status: 'queued' | 'processing' | 'ready' | 'failed' | 'canceled' | 'expired';
   progress: number;
   fileSize?: number;
   error?: string;
