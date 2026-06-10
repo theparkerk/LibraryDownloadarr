@@ -26,6 +26,19 @@ const httpsAgent = new https.Agent({
 // subs (pgs/vobsub/dvd) can't, so they're excluded (those titles get no subs).
 const TEXT_SUB_CODECS = new Set(['srt', 'subrip', 'ass', 'ssa', 'mov_text', 'webvtt', 'vtt', 'text']);
 
+// Display/file title. Episodes → "Show - SxxExx - Episode Name"; everything
+// else keeps its own title. Drives the Conversions panel + downloaded filename.
+const buildJobTitle = (m: any): string => {
+  if (m?.type === 'episode') {
+    const show = m.grandparentTitle || 'Unknown Show';
+    const s = m.parentIndex != null ? `S${String(m.parentIndex).padStart(2, '0')}` : '';
+    const e = m.index != null ? `E${String(m.index).padStart(2, '0')}` : '';
+    const code = `${s}${e}`;
+    return [show, code, m.title].filter(Boolean).join(' - ');
+  }
+  return m?.title || 'download';
+};
+
 // Choose the best full English text subtitle stream id from item metadata, or
 // undefined if none. Prefers full dialogue (non-forced, non-SDH) > SDH >
 // forced, and excludes commentary tracks.
@@ -460,18 +473,28 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         return res.status(429).json({ error: 'Too many conversions in progress. Try again shortly.' });
       }
 
+      // Friendly title: "Show - SxxExx - Episode" for episodes; plain title otherwise
+      const jobTitle = buildJobTitle(metadata);
+
+      // Remote servers encode locally on the M4 from the original file (the
+      // live remote transcode session is too fragile across the internet).
+      // Require partKey to be a plain Plex path ("/library/parts/…") so it
+      // can't inject a URL authority when concatenated after the server URL.
+      const partKey = metadata.Media?.[0]?.Part?.[0]?.key;
+      const localEncode = !isHome && typeof partKey === 'string' && partKey.startsWith('/library/');
+
       const job = db.createTranscodeJob({
         userId: req.user!.id,
         ratingKey,
         serverId,
         quality: preset.id,
-        title: metadata.title || 'download',
+        title: jobTitle,
         subtitles: wantSubs,
         subtitleStreamId,
       });
       const durationSec = metadata.duration ? metadata.duration / 1000 : undefined;
-      transcodeService.enqueue({ id: job.id, ratingKey, serverUrl, token, preset, durationSec, subtitleStreamId });
-      logger.info('Transcode requested', { jobId: job.id, ratingKey, quality: preset.id, server: serverName, subtitleStreamId });
+      transcodeService.enqueue({ id: job.id, ratingKey, serverUrl, token, preset, durationSec, subtitleStreamId, localEncode, partKey });
+      logger.info('Transcode requested', { jobId: job.id, ratingKey, quality: preset.id, server: serverName, subtitleStreamId, localEncode });
       return res.json({ jobId: job.id, status: 'queued', reused: false });
     } catch (error) {
       logger.error('Failed to start transcode', { error });

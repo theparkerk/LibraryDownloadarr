@@ -27,6 +27,12 @@ interface JobSpec {
   durationSec?: number; // for progress %
   subtitleStreamId?: string; // English text subtitle to mux as soft mov_text
   subsRetried?: boolean; // internal: already retried once without subs
+  // Remote-server jobs encode locally on the M4 from the original file
+  // (reliable) instead of streaming the source Plex's live HLS transcode
+  // (fragile across the internet). localEncode=true uses the original at
+  // partKey + software x264.
+  localEncode?: boolean;
+  partKey?: string;
 }
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -123,6 +129,10 @@ export class TranscodeService {
   }
 
   private run(spec: JobSpec): void {
+    if (spec.localEncode) {
+      void this.runLocalEncode(spec);
+      return;
+    }
     const url = this.buildTranscodeUrl(spec);
     const out = this.partPath(spec.id);
     this.db.setTranscodeJobProcessing(spec.id, spec.durationSec);
@@ -243,6 +253,150 @@ export class TranscodeService {
     });
   }
 
+  // Remote path: pull the original file (robust static serve + reconnect),
+  // then software-encode it locally on the M4. Avoids the fragile live Plex
+  // transcode session that keeps dying across the internet. Two ffmpeg
+  // phases; the original is deleted right after the encode.
+  private async runLocalEncode(spec: JobSpec): Promise<void> {
+    this.db.setTranscodeJobProcessing(spec.id, spec.durationSec);
+    const src = path.join(config.transcode.tempDir, `${spec.id}.src.mkv`);
+    const out = this.partPath(spec.id);
+    const final = this.outputPath(spec.id);
+    const dur = spec.durationSec || 0;
+    const originalUrl = `${spec.serverUrl}${spec.partKey}?download=1&X-Plex-Token=${encodeURIComponent(spec.token)}`;
+
+    try {
+      // Phase 1: download original → src (download progress maps to 0–15%)
+      await this.runChild(
+        spec,
+        [
+          '-nostdin', '-loglevel', 'error', '-progress', 'pipe:1',
+          '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '30',
+          '-rw_timeout', '60000000',
+          '-i', originalUrl,
+          '-c', 'copy', '-f', 'matroska', '-y', src,
+        ],
+        (us) => (dur > 0 ? Math.min(15, (us / 1e6 / dur) * 15) : 0)
+      );
+
+      // Pick the English text subtitle stream from the downloaded original
+      const subIdx = spec.subtitleStreamId ? this.findEngTextSubIndex(src) : null;
+      const subArgs =
+        subIdx != null
+          ? ['-map', '0:v:0?', '-map', '0:a:0?', '-map', `0:s:${subIdx}`, '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng']
+          : ['-map', '0:v:0?', '-map', '0:a:0?'];
+      const h = spec.preset.videoResolution.split('x')[1] || '1080';
+      const vbr = spec.preset.maxVideoBitrate;
+
+      // Phase 2: software-encode local original (encode progress maps to 15–100%)
+      await this.runChild(
+        spec,
+        [
+          '-nostdin', '-loglevel', 'error', '-progress', 'pipe:1',
+          '-i', src,
+          ...subArgs,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
+          '-maxrate', `${vbr}k`, '-bufsize', `${vbr * 2}k`,
+          '-vf', `scale=-2:min(ih\\,${h})`, // cap height, never upscale
+          '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
+          '-movflags', '+faststart', '-f', 'mp4', '-y', out,
+        ],
+        (us) => 15 + (dur > 0 ? Math.min(84, (us / 1e6 / dur) * 85) : 0)
+      );
+
+      fs.renameSync(out, final);
+      const size = fs.statSync(final).size;
+      const subsIncluded = subIdx != null && this.hasSubtitleStream(final);
+      this.db.setTranscodeJobReady(spec.id, final, size, subsIncluded);
+      this.safeUnlink(src); // drop the original once converted
+      logger.info('Transcode (local encode) ready', { jobId: spec.id, size, subsIncluded });
+    } catch (err: any) {
+      this.safeUnlink(src);
+      this.safeUnlink(out);
+      // If canceled mid-flight, don't overwrite the canceled status
+      const current = this.db.getTranscodeJob(spec.id);
+      if (current?.status !== 'canceled') {
+        logger.warn('Local encode failed', { jobId: spec.id, error: err?.message });
+        this.db.setTranscodeJobFailed(spec.id, err?.message || 'Local encode failed');
+      }
+    }
+    this.pump();
+  }
+
+  // Spawn one ffmpeg, tracking it in `active`, parsing -progress for real
+  // advancement (drives progress + stall watchdog). Resolves on exit 0,
+  // rejects otherwise (incl. kill via cancel/stall).
+  private runChild(spec: JobSpec, args: string[], progressPct: (us: number) => number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      this.active.set(spec.id, { child, spec });
+      let stderr = '';
+      let lastAdvanceAt = Date.now();
+      let lastOutTime = -1;
+
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastAdvanceAt > config.transcode.stallTimeoutMs) {
+          clearInterval(watchdog);
+          logger.warn('Local job stalled; killing', { jobId: spec.id });
+          child.kill('SIGKILL');
+        }
+      }, 30_000);
+
+      child.stdout.on('data', (buf: Buffer) => {
+        const m = buf.toString().match(/out_time_ms=(\d+)/g);
+        if (m) {
+          const us = parseInt(m[m.length - 1].split('=')[1], 10);
+          if (us > lastOutTime) {
+            lastOutTime = us;
+            lastAdvanceAt = Date.now();
+            this.db.updateTranscodeJobProgress(spec.id, progressPct(us));
+          }
+        }
+      });
+      child.stderr.on('data', (buf: Buffer) => {
+        stderr += buf.toString();
+        if (stderr.length > 8000) stderr = stderr.slice(-8000);
+      });
+      child.on('error', (e) => {
+        clearInterval(watchdog);
+        if (this.active.get(spec.id)?.child === child) this.active.delete(spec.id);
+        reject(e);
+      });
+      child.on('close', (code) => {
+        clearInterval(watchdog);
+        if (this.active.get(spec.id)?.child === child) this.active.delete(spec.id);
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim().split('\n').pop() || `ffmpeg exited ${code}`));
+      });
+    });
+  }
+
+  // First English text-subtitle stream index (relative to subtitle streams,
+  // for -map 0:s:N), or null. Excludes image subs (pgs/vobsub) and commentary.
+  private findEngTextSubIndex(file: string): number | null {
+    try {
+      const out = spawnSync(
+        'ffprobe',
+        ['-v', 'error', '-select_streams', 's', '-show_entries',
+         'stream=codec_name:stream_tags=language,title', '-of', 'json', file],
+        { encoding: 'utf8', timeout: 20000 }
+      );
+      const streams = JSON.parse(out.stdout || '{}').streams || [];
+      const TEXT = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
+      for (let i = 0; i < streams.length; i++) {
+        const s = streams[i];
+        const lang = (s.tags?.language || '').toLowerCase();
+        const title = (s.tags?.title || '').toLowerCase();
+        if ((lang === 'eng' || lang === 'en') && TEXT.has((s.codec_name || '').toLowerCase()) && !title.includes('commentary')) {
+          return i; // i = index among subtitle streams → 0:s:i
+        }
+      }
+    } catch {
+      /* fall through */
+    }
+    return null;
+  }
+
   private fail(spec: JobSpec, message: string): void {
     const entry = this.active.get(spec.id);
     if (entry) {
@@ -311,6 +465,7 @@ export class TranscodeService {
   deleteJobOutput(jobId: string): void {
     this.safeUnlink(this.outputPath(jobId));
     this.safeUnlink(this.partPath(jobId));
+    this.safeUnlink(path.join(config.transcode.tempDir, `${jobId}.src.mkv`)); // pulled original
   }
 
   // On boot: fail jobs left mid-flight by a crash/restart and clear orphan
@@ -349,7 +504,7 @@ export class TranscodeService {
     for (const [jobId, { child, spec }] of this.active) {
       child.kill('SIGKILL');
       this.db.setTranscodeJobFailed(jobId, 'Interrupted by server shutdown');
-      this.safeUnlink(this.partPath(jobId));
+      this.deleteJobOutput(jobId); // .part + .mp4 + the pulled .src.mkv (can be huge)
       this.stopPlexSession(spec);
     }
     this.active.clear();
