@@ -4,12 +4,13 @@ import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
 import { MediaGrid } from '../components/MediaGrid';
 import { api } from '../services/api';
-import { MediaItem } from '../types';
+import { Library, MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
+  const [libraries, setLibraries] = useState<Library[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
@@ -28,12 +29,14 @@ export const Dashboard: React.FC = () => {
 
   const loadDashboard = async () => {
     try {
-      const [media, downloadStats] = await Promise.all([
+      const [media, downloadStats, libs] = await Promise.all([
         api.getRecentlyAdded(100),
         api.getDownloadStats().catch(() => null),
+        api.getLibraries().catch(() => []),
       ]);
       setRecentlyAdded(media);
       setStats(downloadStats);
+      setLibraries(libs);
     } catch (error) {
       console.error('Failed to load dashboard', error);
     } finally {
@@ -60,12 +63,18 @@ export const Dashboard: React.FC = () => {
 
             {user?.isAdmin && (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 md:gap-6 mb-6 md:mb-8">
-                <div className="card p-4 md:p-6">
+                <div
+                  className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors"
+                  onClick={() => libraries.length > 0 && navigate(`/library/${libraries[0].key}`)}
+                >
                   <div className="text-3xl md:text-4xl mb-3 md:mb-4">🎬</div>
                   <h3 className="text-lg md:text-xl font-semibold mb-2">Browse Libraries</h3>
                   <p className="text-gray-400 text-xs md:text-sm">
                     Access all your Plex libraries with full metadata and artwork
                   </p>
+                  {libraries.length > 0 && (
+                    <p className="text-primary-400 text-xs mt-2">Click to browse →</p>
+                  )}
                 </div>
 
                 <div className="card p-4 md:p-6 cursor-pointer hover:border-primary-500 transition-colors" onClick={() => navigate('/admin/download-history')}>
