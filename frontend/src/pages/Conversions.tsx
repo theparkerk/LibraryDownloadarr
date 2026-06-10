@@ -40,6 +40,15 @@ export const Conversions: React.FC = () => {
     }
   };
 
+  const cancel = async (job: TranscodeJobView) => {
+    try {
+      await api.cancelTranscode(job.id);
+      refreshConversions();
+    } catch {
+      /* it may have just finished; the next poll reconciles */
+    }
+  };
+
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const retry = async (job: TranscodeJobView) => {
     setRetryingId(job.id);
@@ -97,8 +106,17 @@ export const Conversions: React.FC = () => {
                         <div className="font-medium text-sm md:text-base truncate">{job.title}</div>
                         <div className="text-xs text-gray-400">{qualityLabel(job.quality)}</div>
                       </div>
-                      <div className="text-sm text-primary-400 font-semibold whitespace-nowrap">
-                        {job.progress}%{job.etaSec ? ` · ${fmtEta(job.etaSec)} left` : ''}
+                      <div className="flex items-center gap-3 whitespace-nowrap">
+                        <span className="text-sm text-primary-400 font-semibold">
+                          {job.progress}%{job.etaSec ? ` · ${fmtEta(job.etaSec)} left` : ''}
+                        </span>
+                        <button
+                          onClick={() => cancel(job)}
+                          className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+                          title="Cancel conversion"
+                        >
+                          ✕ Cancel
+                        </button>
                       </div>
                     </div>
                     <div className="w-full h-2 bg-dark-200 rounded-full overflow-hidden">
@@ -119,9 +137,18 @@ export const Conversions: React.FC = () => {
               <div className="space-y-2">
                 {queued.map((job) => (
                   <Row key={job.id} job={job}>
-                    <span className="text-xs text-gray-400 whitespace-nowrap">
-                      #{job.queuePosition}{job.etaSec ? ` · starts in ${fmtEta(job.etaSec)}` : ''}
-                    </span>
+                    <div className="flex items-center gap-3 whitespace-nowrap">
+                      <span className="text-xs text-gray-400">
+                        #{job.queuePosition}{job.etaSec ? ` · starts in ${fmtEta(job.etaSec)}` : ''}
+                      </span>
+                      <button
+                        onClick={() => cancel(job)}
+                        className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+                        title="Remove from queue"
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </Row>
                 ))}
               </div>

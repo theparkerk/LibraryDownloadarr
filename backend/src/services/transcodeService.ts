@@ -228,6 +228,28 @@ export class TranscodeService {
     this.pump();
   }
 
+  // Cancel a queued or in-flight job. Returns false if it wasn't cancelable
+  // (already finished/gone). The route validates ownership first.
+  cancel(jobId: string): boolean {
+    const qi = this.queue.findIndex((s) => s.id === jobId);
+    if (qi >= 0) {
+      this.queue.splice(qi, 1);
+      this.db.setTranscodeJobStatus(jobId, 'canceled');
+      return true;
+    }
+    const entry = this.active.get(jobId);
+    if (entry) {
+      this.active.delete(jobId);
+      entry.child.kill('SIGKILL'); // the close handler sees it's gone and just pumps
+      this.db.setTranscodeJobStatus(jobId, 'canceled');
+      this.safeUnlink(this.partPath(jobId));
+      this.stopPlexSession(entry.spec);
+      this.pump();
+      return true;
+    }
+    return false;
+  }
+
   // Best-effort release of the Plex transcode session
   private stopPlexSession(spec: JobSpec): void {
     const sessionId = `ldarr-${spec.id}`;

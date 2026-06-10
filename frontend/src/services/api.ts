@@ -304,6 +304,10 @@ class ApiClient {
     return response.data;
   }
 
+  async cancelTranscode(jobId: string): Promise<void> {
+    await this.client.post(`/media/transcode/${jobId}/cancel`);
+  }
+
   async transcodeDownloadUrl(jobId: string): Promise<{ url: string; expiresAt: number }> {
     const response = await this.client.post<{ url: string; expiresAt: number }>(
       `/media/transcode/${jobId}/download-token`

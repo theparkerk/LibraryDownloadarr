@@ -588,6 +588,19 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
     });
   });
 
+  // Cancel a queued or in-flight conversion (owner-scoped)
+  router.post('/transcode/:jobId/cancel', authMiddleware, async (req: AuthRequest, res) => {
+    const job = db.getTranscodeJob(req.params.jobId);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    if (job.status !== 'queued' && job.status !== 'processing') {
+      return res.status(409).json({ error: 'This conversion can no longer be canceled' });
+    }
+    transcodeService.cancel(job.id);
+    return res.json({ ok: true });
+  });
+
   // Stream a finished conversion's temp file with Range/resume. Auth via a
   // session Bearer (owner) OR a scoped ?dl= transcode token for this jobId.
   router.get('/transcode/:jobId/download', async (req: AuthRequest, res) => {
