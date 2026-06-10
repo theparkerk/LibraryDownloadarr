@@ -22,6 +22,35 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: false
 });
 
+// Text subtitle codecs that can become a soft mov_text track in MP4. Image
+// subs (pgs/vobsub/dvd) can't, so they're excluded (those titles get no subs).
+const TEXT_SUB_CODECS = new Set(['srt', 'subrip', 'ass', 'ssa', 'mov_text', 'webvtt', 'vtt', 'text']);
+
+// Choose the best full English text subtitle stream id from item metadata, or
+// undefined if none. Prefers full dialogue (non-forced, non-SDH) > SDH >
+// forced, and excludes commentary tracks.
+const pickEnglishTextSubtitle = (metadata: any): string | undefined => {
+  // The transcode hardcodes mediaIndex=0/partIndex=0, so only consider
+  // subtitle streams from that same media/part — a stream id from a different
+  // part wouldn't apply to what we transcode.
+  const part = metadata?.Media?.[0]?.Part?.[0];
+  if (!part) return undefined;
+  const candidates: { id: string; rank: number }[] = [];
+  for (const s of part?.Stream || []) {
+    if (s?.streamType !== 3) continue;
+    if (s?.languageCode !== 'eng') continue;
+    if (!TEXT_SUB_CODECS.has(String(s?.codec || '').toLowerCase())) continue;
+    const title = String(s?.title || s?.extendedDisplayTitle || '').toLowerCase();
+    if (title.includes('commentary')) continue;
+    const forced = s?.forced === true || s?.forced === 1 || s?.forced === '1';
+    const sdh = title.includes('sdh') || title.includes('hearing');
+    const rank = forced ? 2 : sdh ? 1 : 0; // lower = preferred (full dialogue)
+    if (s?.id != null) candidates.push({ id: String(s.id), rank });
+  }
+  candidates.sort((a, b) => a.rank - b.rank);
+  return candidates[0]?.id;
+};
+
 export const createMediaRouter = (db: DatabaseService, transcodeService: TranscodeService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
@@ -379,7 +408,12 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
   // full-size original.
   router.post('/transcode', authMiddleware, async (req: AuthRequest, res) => {
     try {
-      const { ratingKey, quality } = req.body as { ratingKey?: string; quality?: string };
+      const { ratingKey, quality, subtitles } = req.body as {
+        ratingKey?: string;
+        quality?: string;
+        subtitles?: boolean;
+      };
+      const wantSubs = subtitles !== false; // default on
 
       // ratingKey is interpolated into the Plex transcode path — keep it numeric
       if (!ratingKey || typeof ratingKey !== 'string' || !/^\d+$/.test(ratingKey)) {
@@ -411,8 +445,12 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
 
       const serverId = isHome ? undefined : (typeof req.query.serverId === 'string' ? req.query.serverId : undefined) ?? (typeof req.body?.serverId === 'string' ? req.body.serverId : undefined);
 
+      // Pick the best English *text* subtitle stream (soft subs only; image
+      // subs like PGS can't go in an MP4). Skip silently if none.
+      const subtitleStreamId = wantSubs ? pickEnglishTextSubtitle(metadata) : undefined;
+
       // Attach to an existing in-flight/ready job rather than re-transcoding
-      const existing = db.findReusableTranscodeJob(req.user!.id, ratingKey, serverId, preset.id);
+      const existing = db.findReusableTranscodeJob(req.user!.id, ratingKey, serverId, preset.id, wantSubs);
       if (existing) {
         return res.json({ jobId: existing.id, status: existing.status, reused: true });
       }
@@ -422,14 +460,87 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         return res.status(429).json({ error: 'Too many conversions in progress. Try again shortly.' });
       }
 
-      const job = db.createTranscodeJob(req.user!.id, ratingKey, serverId, preset.id, metadata.title || 'download');
+      const job = db.createTranscodeJob({
+        userId: req.user!.id,
+        ratingKey,
+        serverId,
+        quality: preset.id,
+        title: metadata.title || 'download',
+        subtitles: wantSubs,
+        subtitleStreamId,
+      });
       const durationSec = metadata.duration ? metadata.duration / 1000 : undefined;
-      transcodeService.enqueue({ id: job.id, ratingKey, serverUrl, token, preset, durationSec });
-      logger.info('Transcode requested', { jobId: job.id, ratingKey, quality: preset.id, server: serverName });
+      transcodeService.enqueue({ id: job.id, ratingKey, serverUrl, token, preset, durationSec, subtitleStreamId });
+      logger.info('Transcode requested', { jobId: job.id, ratingKey, quality: preset.id, server: serverName, subtitleStreamId });
       return res.json({ jobId: job.id, status: 'queued', reused: false });
     } catch (error) {
       logger.error('Failed to start transcode', { error });
       return res.status(500).json({ error: 'Failed to start conversion' });
+    }
+  });
+
+  // List the user's recent conversions with ETAs (Conversions panel + badge)
+  router.get('/transcode/jobs', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const jobs = db.getRecentTranscodeJobs(req.user!.id, 25);
+      const now = Date.now();
+
+      // Observe encode speed (media-seconds per wall-second) from THIS user's
+      // own processing job, to estimate queued run times. Staying within the
+      // user's own jobs keeps the endpoint owner-scoped (never exposes another
+      // user's remaining time); fall back to ~4x realtime.
+      const processing = jobs.find((j) => j.status === 'processing');
+      let speedFactor = 4;
+      if (processing?.startedAt && processing.progress > 0 && processing.durationSec) {
+        const wall = (now - processing.startedAt) / 1000;
+        if (wall > 2) speedFactor = Math.max(0.5, (processing.progress / 100) * processing.durationSec / wall);
+      }
+      const fullEstimate = (j: { durationSec?: number }) =>
+        j.durationSec ? j.durationSec / speedFactor : null;
+      const remainingOf = (j: { startedAt?: number; progress: number; durationSec?: number }) => {
+        if (j.startedAt && j.progress > 0) return ((now - j.startedAt) / 1000) * (100 - j.progress) / j.progress;
+        return fullEstimate(j);
+      };
+
+      // Queue order = creation order among queued jobs
+      const queuedAsc = jobs
+        .filter((j) => j.status === 'queued')
+        .sort((a, b) => a.createdAt - b.createdAt);
+      const processingRemaining = processing ? remainingOf(processing) ?? 0 : 0;
+
+      const out = jobs.map((j) => {
+        let etaSec: number | null = null;
+        let queuePosition: number | undefined;
+        if (j.status === 'processing') {
+          etaSec = remainingOf(j);
+        } else if (j.status === 'queued') {
+          const idx = queuedAsc.findIndex((q) => q.id === j.id); // 0-based
+          queuePosition = idx + 1;
+          const aheadTime = queuedAsc.slice(0, idx).reduce((sum, q) => sum + (fullEstimate(q) || 0), 0);
+          etaSec = processingRemaining + aheadTime + (fullEstimate(j) || 0);
+        }
+        return {
+          id: j.id,
+          title: j.title,
+          quality: j.quality,
+          serverId: j.serverId,
+          status: j.status,
+          progress: j.progress,
+          fileSize: j.fileSize,
+          error: j.error,
+          subtitles: j.subtitles,
+          subtitlesIncluded: j.subtitlesIncluded,
+          createdAt: j.createdAt,
+          etaSec: etaSec != null ? Math.round(etaSec) : null,
+          queuePosition,
+        };
+      });
+
+      const activeCount = jobs.filter((j) => j.status === 'queued' || j.status === 'processing').length;
+      return res.json({ jobs: out, activeCount });
+    } catch (error) {
+      logger.error('Failed to list transcode jobs', { error });
+      return res.status(500).json({ error: 'Failed to list conversions' });
     }
   });
 

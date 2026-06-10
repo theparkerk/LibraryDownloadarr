@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import https from 'https';
@@ -25,6 +25,8 @@ interface JobSpec {
   token: string;
   preset: TranscodePreset;
   durationSec?: number; // for progress %
+  subtitleStreamId?: string; // English text subtitle to mux as soft mov_text
+  subsRetried?: boolean; // internal: already retried once without subs
 }
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -70,13 +72,22 @@ export class TranscodeService {
       videoResolution: p.videoResolution,
       maxVideoBitrate: String(p.maxVideoBitrate),
       videoQuality: String(p.videoQuality),
-      subtitles: 'none',
       'X-Plex-Token': spec.token,
       'X-Plex-Client-Identifier': sessionId,
       session: sessionId,
       'X-Plex-Product': config.plex.product,
       'X-Plex-Platform': 'Web',
     });
+    if (spec.subtitleStreamId) {
+      // Ask Plex to deliver the English text subtitle as a sidecar (WebVTT)
+      // rendition; the profile hint pushes its decision to "transcode" rather
+      // than "burn", and ffmpeg muxes it as a soft mov_text track.
+      params.set('subtitles', 'auto');
+      params.set('subtitleStreamID', spec.subtitleStreamId);
+      params.set('X-Plex-Client-Profile-Extra', 'add-direct-play-profile(type=subtitleProfile&codec=srt)');
+    } else {
+      params.set('subtitles', 'none');
+    }
     return `${spec.serverUrl}/video/:/transcode/universal/start.m3u8?${params.toString()}`;
   }
 
@@ -100,6 +111,17 @@ export class TranscodeService {
     const out = this.partPath(spec.id);
     this.db.setTranscodeJobProcessing(spec.id, spec.durationSec);
 
+    // When subtitles are requested, map them optionally (trailing '?') and
+    // convert to mov_text, so a missing/undeliverable sub never fails the
+    // video conversion — worst case you get a video-only file.
+    const codecArgs = spec.subtitleStreamId
+      ? [
+          '-map', '0:v:0?', '-map', '0:a:0?', '-map', '0:s:0?',
+          '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'mov_text',
+          '-metadata:s:s:0', 'language=eng',
+        ]
+      : ['-c', 'copy'];
+
     const args = [
       '-nostdin',
       '-loglevel', 'error',
@@ -107,7 +129,7 @@ export class TranscodeService {
       // HLS over https (plex.direct) needs the protocol whitelist
       '-protocol_whitelist', 'file,crypto,data,http,https,tcp,tls',
       '-i', url,
-      '-c', 'copy',
+      ...codecArgs,
       '-movflags', '+faststart',
       // Output goes to a .part file; ffmpeg can't infer the muxer from that
       // extension, so name it explicitly
@@ -165,13 +187,26 @@ export class TranscodeService {
           const final = this.outputPath(spec.id);
           fs.renameSync(out, final);
           const size = fs.statSync(final).size;
-          this.db.setTranscodeJobReady(spec.id, final, size);
-          logger.info('Transcode job ready', { jobId: spec.id, size });
+          const subsIncluded = spec.subtitleStreamId ? this.hasSubtitleStream(final) : false;
+          this.db.setTranscodeJobReady(spec.id, final, size, subsIncluded);
+          this.stopPlexSession(spec); // release the source session promptly
+          logger.info('Transcode job ready', { jobId: spec.id, size, subsIncluded });
         } catch (e: any) {
           this.db.setTranscodeJobFailed(spec.id, `finalize failed: ${e.message}`);
+          this.stopPlexSession(spec);
         }
       } else {
         const reason = stderr.trim().split('\n').pop() || `ffmpeg exited ${code}`;
+        // If a subtitled conversion failed, retry once without subtitles so
+        // the video still gets through (a bad text-sub stream shouldn't sink
+        // the whole download).
+        if (spec.subtitleStreamId && !spec.subsRetried) {
+          logger.warn('Transcode failed with subtitles; retrying without', { jobId: spec.id, reason });
+          this.stopPlexSession(spec);
+          this.safeUnlink(out);
+          this.run({ ...spec, subtitleStreamId: undefined, subsRetried: true });
+          return;
+        }
         logger.warn('Transcode job failed', { jobId: spec.id, code, reason });
         this.db.setTranscodeJobFailed(spec.id, reason);
         this.safeUnlink(out);
@@ -208,6 +243,21 @@ export class TranscodeService {
     fs.promises.unlink(p).catch(() => {});
   }
 
+  // Did a subtitle track actually land in the output? (ffprobe ships with the
+  // ffmpeg apk package.) Best-effort — false on any error.
+  private hasSubtitleStream(file: string): boolean {
+    try {
+      const out = spawnSync(
+        'ffprobe',
+        ['-v', 'error', '-select_streams', 's', '-show_entries', 'stream=index', '-of', 'csv=p=0', file],
+        { encoding: 'utf8', timeout: 15000 }
+      );
+      return !!out.stdout && out.stdout.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   // Called by the route when a download finishes (or the file ages out)
   deleteJobOutput(jobId: string): void {
     this.safeUnlink(this.outputPath(jobId));
@@ -227,7 +277,7 @@ export class TranscodeService {
     }
   }
 
-  // Hourly: drop aged-out ready files + their rows
+  // Hourly: drop aged-out ready files + their rows, and tidy old terminal rows
   cleanupExpired(): void {
     const expired = this.db.getExpiredTranscodeJobs(config.transcode.fileTtlMs);
     for (const job of expired) {
@@ -236,6 +286,11 @@ export class TranscodeService {
     }
     if (expired.length > 0) {
       logger.info(`Cleaned up ${expired.length} expired transcode files`);
+    }
+    // Failed/canceled rows have no file; clear ones older than the TTL
+    const purged = this.db.deleteStaleTerminalTranscodeJobs(config.transcode.fileTtlMs);
+    if (purged > 0) {
+      logger.info(`Cleared ${purged} old failed/canceled transcode rows`);
     }
   }
 

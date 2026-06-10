@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { api } from '../services/api';
+import { refreshConversions } from '../stores/conversionsStore';
 
 // What to download. File downloads need the specific part; season/album
 // downloads are zipped server-side.
@@ -8,7 +9,7 @@ import { api } from '../services/api';
 // quality (file scope only): undefined/'original' = the existing direct
 // download; a preset id ('720p'/'1080p') = a server-side conversion job.
 export type DownloadScope =
-  | { type: 'file'; ratingKey: string; partKey: string; serverId?: string; quality?: string }
+  | { type: 'file'; ratingKey: string; partKey: string; serverId?: string; quality?: string; subtitles?: boolean }
   | { type: 'season'; ratingKey: string; serverId?: string }
   | { type: 'album'; ratingKey: string; serverId?: string };
 
@@ -18,8 +19,7 @@ interface Download {
   partKey: string;
   filename: string;
   title: string;
-  status: 'preparing' | 'converting' | 'started' | 'error';
-  progress?: number; // converting %
+  status: 'preparing' | 'queued' | 'started' | 'error';
   error?: string;
 }
 
@@ -42,8 +42,6 @@ export const useDownloads = () => {
 interface DownloadProviderProps {
   children: ReactNode;
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) => {
   const [downloads, setDownloads] = useState<Download[]>([]);
@@ -76,32 +74,19 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         partKey,
         filename,
         title,
-        status: isConversion ? 'converting' : 'preparing',
-        progress: isConversion ? 0 : undefined,
+        status: isConversion ? 'queued' : 'preparing',
       },
     ]);
 
     try {
       if (isConversion && scope.type === 'file') {
-        // Server-side conversion: start the job, poll until ready, then hand
-        // the finished file to the browser's downloader.
-        const { jobId } = await api.startTranscode(scope.ratingKey, scope.quality!, scope.serverId);
-
-        // Poll (~2s) until ready/failed. The transcode can take many minutes
-        // for a long movie — that's expected; the tray shows progress.
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          await sleep(2000);
-          const job = await api.getTranscodeJob(jobId);
-          if (job.status === 'ready') break;
-          if (job.status === 'failed' || job.status === 'canceled') {
-            throw new Error(job.error || 'Conversion failed');
-          }
-          update(downloadId, { progress: job.progress });
-        }
-
-        const { url } = await api.transcodeDownloadUrl(jobId);
-        triggerBrowserDownload(url);
+        // Server-side conversion: just enqueue. Progress, ETA, and the
+        // download link live in the Conversions panel so several can queue
+        // up at once without blocking the page.
+        await api.startTranscode(scope.ratingKey, scope.quality!, scope.serverId, scope.subtitles !== false);
+        refreshConversions();
+        update(downloadId, { status: 'queued' });
+        autoRemove(downloadId, 6000);
       } else {
         const { url } = await api.createDownloadToken(
           scope.type,
@@ -110,10 +95,9 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
           scope.serverId
         );
         triggerBrowserDownload(url);
+        update(downloadId, { status: 'started' });
+        autoRemove(downloadId, 8000);
       }
-
-      update(downloadId, { status: 'started' });
-      autoRemove(downloadId, 8000);
     } catch (error: any) {
       const message = error.response?.data?.error || error.message || 'Failed to start download';
       update(downloadId, { status: 'error', error: message });

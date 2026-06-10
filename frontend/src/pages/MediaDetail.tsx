@@ -39,6 +39,9 @@ export const MediaDetail: React.FC = () => {
   // The active title's ratingKey on the active source server. Switching
   // source swaps to that server's ratingKey for the same title.
   const [activeRatingKey, setActiveRatingKey] = useState<string | undefined>(ratingKey);
+  // English soft-subtitles on converted downloads (default on); ignored for
+  // Original downloads, which keep the file's embedded subs.
+  const [subsEnabled, setSubsEnabled] = useState(true);
 
   // New navigation (different media): reset to that route's source
   useEffect(() => {
@@ -160,6 +163,7 @@ export const MediaDetail: React.FC = () => {
         partKey,
         serverId: srcServerId,
         quality: quality === 'original' ? undefined : quality,
+        subtitles: subsEnabled,
       },
       filename,
       itemTitle
@@ -345,6 +349,21 @@ export const MediaDetail: React.FC = () => {
                       </select>
                       <span className="text-xs text-gray-500">available on {availability.length} servers</span>
                     </div>
+                  )}
+
+                  {/* Converted-download options: include English subtitles
+                      (soft track) when the title has text subtitles. Doesn't
+                      apply to Original, which keeps the file's own subs. */}
+                  {media.type !== 'album' && (
+                    <label className="mt-4 flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={subsEnabled}
+                        onChange={(e) => setSubsEnabled(e.target.checked)}
+                        className="accent-primary-500"
+                      />
+                      Include English subtitles on converted downloads (for VLC)
+                    </label>
                   )}
 
                   {/* Download Options */}

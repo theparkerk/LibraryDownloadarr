@@ -78,7 +78,11 @@ export interface TranscodeJob {
   fileSize?: number;
   durationSec?: number;
   error?: string;
+  subtitles: boolean; // English soft-subs requested
+  subtitleStreamId?: string; // chosen English text subtitle stream, if any
+  subtitlesIncluded?: boolean; // whether a sub track actually made it in
   createdAt: number;
+  startedAt?: number; // processing-start, for ETA
   readyAt?: number;
 }
 
@@ -254,6 +258,22 @@ export class DatabaseService {
         ready_at INTEGER
       )
     `);
+
+    // Migration: ETA + subtitle support columns
+    for (const [col, ddl] of [
+      ['started_at', 'ALTER TABLE transcode_jobs ADD COLUMN started_at INTEGER'],
+      ['subtitles', 'ALTER TABLE transcode_jobs ADD COLUMN subtitles INTEGER NOT NULL DEFAULT 0'],
+      ['subtitle_stream_id', 'ALTER TABLE transcode_jobs ADD COLUMN subtitle_stream_id TEXT'],
+      ['subtitles_included', 'ALTER TABLE transcode_jobs ADD COLUMN subtitles_included INTEGER'],
+    ] as [string, string][]) {
+      const has = this.db.prepare(
+        `SELECT COUNT(*) as c FROM pragma_table_info('transcode_jobs') WHERE name=?`
+      ).get(col) as { c: number };
+      if (has.c === 0) {
+        logger.info(`Adding ${col} column to transcode_jobs`);
+        this.db.exec(ddl);
+      }
+    }
 
     logger.info('Database tables initialized');
   }
@@ -488,25 +508,38 @@ export class DatabaseService {
       fileSize: row.file_size ?? undefined,
       durationSec: row.duration_sec ?? undefined,
       error: row.error ?? undefined,
+      subtitles: row.subtitles === 1,
+      subtitleStreamId: row.subtitle_stream_id ?? undefined,
+      subtitlesIncluded: row.subtitles_included == null ? undefined : row.subtitles_included === 1,
       createdAt: row.created_at,
+      startedAt: row.started_at ?? undefined,
       readyAt: row.ready_at ?? undefined,
     };
   }
 
-  createTranscodeJob(
-    userId: string,
-    ratingKey: string,
-    serverId: string | undefined,
-    quality: string,
-    title: string
-  ): TranscodeJob {
+  createTranscodeJob(opts: {
+    userId: string;
+    ratingKey: string;
+    serverId?: string;
+    quality: string;
+    title: string;
+    subtitles: boolean;
+    subtitleStreamId?: string;
+  }): TranscodeJob {
     const id = this.generateId();
     const createdAt = Date.now();
     this.db.prepare(`
-      INSERT INTO transcode_jobs (id, user_id, rating_key, server_id, quality, title, status, progress, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?)
-    `).run(id, userId, ratingKey, serverId ?? null, quality, title, createdAt);
-    return { id, userId, ratingKey, serverId, quality, title, status: 'queued', progress: 0, createdAt };
+      INSERT INTO transcode_jobs (id, user_id, rating_key, server_id, quality, title, status, progress, subtitles, subtitle_stream_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+    `).run(
+      id, opts.userId, opts.ratingKey, opts.serverId ?? null, opts.quality, opts.title,
+      opts.subtitles ? 1 : 0, opts.subtitleStreamId ?? null, createdAt
+    );
+    return {
+      id, userId: opts.userId, ratingKey: opts.ratingKey, serverId: opts.serverId,
+      quality: opts.quality, title: opts.title, status: 'queued', progress: 0,
+      subtitles: opts.subtitles, subtitleStreamId: opts.subtitleStreamId, createdAt,
+    };
   }
 
   getTranscodeJob(id: string): TranscodeJob | undefined {
@@ -514,22 +547,39 @@ export class DatabaseService {
     return row ? this.mapTranscodeJob(row) : undefined;
   }
 
+  // Most recent jobs for a user (for the Conversions panel)
+  getRecentTranscodeJobs(userId: string, limit: number = 25): TranscodeJob[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM transcode_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(userId, limit) as any[];
+    return rows.map((r) => this.mapTranscodeJob(r));
+  }
+
+  // The currently-processing job (for ETA speed-factor); MAX_CONCURRENT=1
+  getProcessingTranscodeJob(): TranscodeJob | undefined {
+    const row = this.db.prepare(
+      "SELECT * FROM transcode_jobs WHERE status = 'processing' ORDER BY started_at ASC LIMIT 1"
+    ).get() as any;
+    return row ? this.mapTranscodeJob(row) : undefined;
+  }
+
   // Reuse a recent in-flight or ready job for the same content+server+quality
-  // so a double-click or a second family member doesn't re-transcode.
+  // +subtitles so a double-click or a second family member doesn't re-transcode.
   findReusableTranscodeJob(
     userId: string,
     ratingKey: string,
     serverId: string | undefined,
-    quality: string
+    quality: string,
+    subtitles: boolean
   ): TranscodeJob | undefined {
     const row = this.db.prepare(`
       SELECT * FROM transcode_jobs
-      WHERE user_id = ? AND rating_key = ? AND quality = ?
+      WHERE user_id = ? AND rating_key = ? AND quality = ? AND subtitles = ?
         AND ((server_id IS NULL AND ? IS NULL) OR server_id = ?)
         AND status IN ('queued', 'processing', 'ready')
       ORDER BY created_at DESC
       LIMIT 1
-    `).get(userId, ratingKey, quality, serverId ?? null, serverId ?? null) as any;
+    `).get(userId, ratingKey, quality, subtitles ? 1 : 0, serverId ?? null, serverId ?? null) as any;
     return row ? this.mapTranscodeJob(row) : undefined;
   }
 
@@ -539,14 +589,14 @@ export class DatabaseService {
 
   setTranscodeJobProcessing(id: string, durationSec?: number): void {
     this.db.prepare(
-      "UPDATE transcode_jobs SET status = 'processing', duration_sec = COALESCE(?, duration_sec) WHERE id = ?"
-    ).run(durationSec ?? null, id);
+      "UPDATE transcode_jobs SET status = 'processing', started_at = ?, duration_sec = COALESCE(?, duration_sec) WHERE id = ?"
+    ).run(Date.now(), durationSec ?? null, id);
   }
 
-  setTranscodeJobReady(id: string, outputPath: string, fileSize: number): void {
+  setTranscodeJobReady(id: string, outputPath: string, fileSize: number, subtitlesIncluded: boolean): void {
     this.db.prepare(
-      "UPDATE transcode_jobs SET status = 'ready', progress = 100, output_path = ?, file_size = ?, ready_at = ? WHERE id = ?"
-    ).run(outputPath, fileSize, Date.now(), id);
+      "UPDATE transcode_jobs SET status = 'ready', progress = 100, output_path = ?, file_size = ?, subtitles_included = ?, ready_at = ? WHERE id = ?"
+    ).run(outputPath, fileSize, subtitlesIncluded ? 1 : 0, Date.now(), id);
   }
 
   setTranscodeJobFailed(id: string, error: string): void {
@@ -572,6 +622,15 @@ export class DatabaseService {
       "SELECT * FROM transcode_jobs WHERE status = 'ready' AND ready_at IS NOT NULL AND ready_at < ?"
     ).all(cutoff) as any[];
     return rows.map((r) => this.mapTranscodeJob(r));
+  }
+
+  // Old failed/canceled rows — no file to clean, just tidy the table
+  deleteStaleTerminalTranscodeJobs(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const res = this.db.prepare(
+      "DELETE FROM transcode_jobs WHERE status IN ('failed','canceled') AND created_at < ?"
+    ).run(cutoff);
+    return res.changes;
   }
 
   deleteTranscodeJob(id: string): void {

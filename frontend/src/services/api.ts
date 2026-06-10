@@ -10,6 +10,23 @@ import {
   Settings,
 } from '../types';
 
+// A conversion job as shown in the Conversions panel.
+export interface TranscodeJobView {
+  id: string;
+  title: string;
+  quality: string;
+  serverId?: string;
+  status: 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
+  progress: number;
+  fileSize?: number;
+  error?: string;
+  subtitles: boolean;
+  subtitlesIncluded?: boolean;
+  createdAt: number;
+  etaSec: number | null;
+  queuePosition?: number;
+}
+
 // Which Plex server the UI is browsing. 'home' (or unset) = the
 // admin-configured server; anything else is a plex.tv machine id the
 // backend verifies against the user's own account.
@@ -241,11 +258,12 @@ class ApiClient {
   async startTranscode(
     ratingKey: string,
     quality: string,
-    serverId?: string
+    serverId?: string,
+    subtitles: boolean = true
   ): Promise<{ jobId: string; status: string; reused: boolean }> {
     const response = await this.client.post<{ jobId: string; status: string; reused: boolean }>(
       '/media/transcode',
-      { ratingKey, quality },
+      { ratingKey, quality, subtitles },
       { params: serverId ? { serverId } : undefined }
     );
     return response.data;
@@ -262,6 +280,13 @@ class ApiClient {
   }> {
     const response = await this.client.get<{ job: any }>(`/media/transcode/${jobId}`);
     return response.data.job;
+  }
+
+  async getTranscodeJobs(): Promise<{ jobs: TranscodeJobView[]; activeCount: number }> {
+    const response = await this.client.get<{ jobs: TranscodeJobView[]; activeCount: number }>(
+      '/media/transcode/jobs'
+    );
+    return response.data;
   }
 
   async transcodeDownloadUrl(jobId: string): Promise<{ url: string; expiresAt: number }> {

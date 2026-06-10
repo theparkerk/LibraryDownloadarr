@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { api, getSelectedServerId, selectServer } from '../services/api';
 import { Library, ServerInfo } from '../types';
 import { useAuthStore } from '../stores/authStore';
+import { useConversionsStore, useConversionsPoll } from '../stores/conversionsStore';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -17,6 +18,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const location = useLocation();
   const { user } = useAuthStore();
   const selectedServerId = getSelectedServerId();
+  // Drive the shared conversions poller + badge from the sidebar (present on
+  // every main page)
+  useConversionsPoll();
+  const activeConversions = useConversionsStore((s) => s.activeCount);
 
   useEffect(() => {
     loadLibraries();
@@ -127,6 +132,20 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
             }`}
           >
             🏠 Home
+          </button>
+
+          <button
+            onClick={() => handleNavigate('/conversions')}
+            className={`w-full text-left px-4 py-2 rounded-lg transition-colors flex items-center justify-between ${
+              isActive('/conversions') ? 'bg-dark-200 text-primary-400' : 'hover:bg-dark-200'
+            }`}
+          >
+            <span>🎞️ Conversions</span>
+            {activeConversions > 0 && (
+              <span className="bg-primary-500 text-white text-xs rounded-full px-2 py-0.5">
+                {activeConversions}
+              </span>
+            )}
           </button>
 
           {user?.isAdmin && (

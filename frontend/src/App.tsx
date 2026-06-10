@@ -9,6 +9,7 @@ import { LibraryView } from './pages/LibraryView';
 import { MediaDetail } from './pages/MediaDetail';
 import { Settings } from './pages/Settings';
 import { SearchResults } from './pages/SearchResults';
+import { Conversions } from './pages/Conversions';
 import { DownloadHistory } from './pages/DownloadHistory';
 import { Logs } from './pages/Logs';
 import { DownloadProvider } from './contexts/DownloadContext';
@@ -108,6 +109,14 @@ const App: React.FC = () => {
               element={
                 <ProtectedRoute>
                   <SearchResults />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/conversions"
+              element={
+                <ProtectedRoute>
+                  <Conversions />
                 </ProtectedRoute>
               }
             />
