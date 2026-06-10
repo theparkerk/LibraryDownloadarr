@@ -754,3 +754,30 @@ CREATE TABLE download_history (
 **Last Updated**: 2025-11-07 (Session: claude/add-download-progress-bar-011CUsC4Kdw1m1yxqpX5x1oG)
 
 **Maintenance Note**: When making significant architectural changes, please update this document to help future agents understand the codebase.
+
+---
+
+## Deploy model (Parker's fork)
+
+This fork (`theparkerk/LibraryDownloadarr`) is the canonical source for the
+instance running on the M4 Mac Mini, serving the family at
+https://downloads.sortadrunk.com (cloudflared, config on M4 at
+`~/.cloudflared/config.yml`).
+
+- **Edit host**: MacBook Pro, clone at `~/Apps/LibraryDownloadarr`
+- **Runtime host**: M4-Mac-Mini (`100.115.129.84`), clone at
+  `~/Apps/LifeOS/librarydownloadarr`, docker-compose on port 5069
+- **Deploy**: commit on MacBook → **push to GitHub** (unpushed commits do
+  not deploy) → then:
+
+  ```bash
+  ssh parkerkelley@100.115.129.84 'cd ~/Apps/LifeOS/librarydownloadarr && \
+    git pull --ff-only && \
+    PATH=/Applications/Docker.app/Contents/Resources/bin:$PATH \
+    /usr/local/bin/docker compose up -d --build'
+  ```
+
+- **Registry**: `machine-inventory/fleet/projects.json` +
+  `fleet/install-specs/librarydownloadarr.json`
+- **Upstream**: `kikootwo/LibraryDownloadarr` is the `upstream` git remote.
+  Mobile/filename/tracking fixes here are candidates to PR back.
