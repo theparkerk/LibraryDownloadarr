@@ -15,9 +15,10 @@ import { createLogsRouter } from './routes/logs';
 // Initialize database
 const db = new DatabaseService(config.database.path);
 
-// Cleanup expired sessions every hour
+// Cleanup expired sessions and download tokens every hour
 setInterval(() => {
   db.cleanupExpiredSessions();
+  db.cleanupExpiredDownloadTokens();
 }, 60 * 60 * 1000);
 
 // Create Express app

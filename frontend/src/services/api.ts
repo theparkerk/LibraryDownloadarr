@@ -157,8 +157,19 @@ class ApiClient {
     return response.data.stats;
   }
 
-  getDownloadUrl(ratingKey: string, partKey: string): string {
-    return `/api/media/${ratingKey}/download?partKey=${encodeURIComponent(partKey)}`;
+  // Issues a scoped, expiring download URL that works without an
+  // Authorization header, so the browser's native download manager can
+  // stream it straight to disk (required for large files on mobile).
+  async createDownloadToken(
+    scopeType: 'file' | 'season' | 'album',
+    ratingKey: string,
+    partKey?: string
+  ): Promise<{ url: string; expiresAt: number }> {
+    const response = await this.client.post<{ url: string; expiresAt: number }>(
+      '/media/download-token',
+      { scopeType, ratingKey, partKey }
+    );
+    return response.data;
   }
 
   async getSeasonSize(seasonRatingKey: string): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
@@ -173,14 +184,6 @@ class ApiClient {
       `/media/album/${albumRatingKey}/size`
     );
     return response.data;
-  }
-
-  getSeasonDownloadUrl(seasonRatingKey: string): string {
-    return `/api/media/season/${seasonRatingKey}/download`;
-  }
-
-  getAlbumDownloadUrl(albumRatingKey: string): string {
-    return `/api/media/album/${albumRatingKey}/download`;
   }
 
   getThumbnailUrl(ratingKey: string, path: string): string {

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { logger } from '../utils/logger';
 
 export interface User {
@@ -38,6 +39,21 @@ export interface Settings {
   value: string;
   updatedAt: number;
 }
+
+export type DownloadScopeType = 'file' | 'season' | 'album';
+
+export interface DownloadToken {
+  id: string;
+  token: string;
+  userId: string;
+  scopeType: DownloadScopeType;
+  ratingKey: string;
+  partKey?: string;
+  expiresAt: number;
+  createdAt: number;
+}
+
+export type DownloadLogStatus = 'started' | 'completed' | 'interrupted' | 'failed';
 
 export class DatabaseService {
   private db: Database.Database;
@@ -137,6 +153,33 @@ export class DatabaseService {
         media_key TEXT NOT NULL,
         file_size INTEGER,
         downloaded_at INTEGER NOT NULL
+      )
+    `);
+
+    // Migration: track download outcome (#13 - history used to record every
+    // started stream as a download, including failed/aborted ones)
+    const hasStatus = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('download_logs') WHERE name='status'
+    `).get() as { count: number };
+
+    if (hasStatus.count === 0) {
+      logger.info('Adding status column to download_logs table');
+      // Legacy rows predate tracking; label them 'completed' to preserve stats
+      this.db.exec("ALTER TABLE download_logs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'");
+    }
+
+    // Short-lived scoped tokens that let the browser's native download
+    // manager fetch files without an Authorization header (#16)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS download_tokens (
+        id TEXT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        user_id TEXT NOT NULL,
+        scope_type TEXT NOT NULL,
+        rating_key TEXT NOT NULL,
+        part_key TEXT,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
       )
     `);
 
@@ -278,13 +321,82 @@ export class DatabaseService {
   }
 
   // Download logs
-  logDownload(userId: string, mediaTitle: string, mediaKey: string, fileSize?: number): void {
+  // Reuses a recent non-completed row for the same user+media so that
+  // browser retries and ranged resumes don't pile up duplicate history
+  // entries (#13). Returns the log row id for later status updates.
+  logDownload(userId: string, mediaTitle: string, mediaKey: string, fileSize?: number): string {
+    const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+    const existing = this.db.prepare(`
+      SELECT id FROM download_logs
+      WHERE user_id = ? AND media_key = ? AND status != 'completed' AND downloaded_at > ?
+      ORDER BY downloaded_at DESC
+      LIMIT 1
+    `).get(userId, mediaKey, sixHoursAgo) as { id: string } | undefined;
+
+    if (existing) {
+      this.db.prepare(`
+        UPDATE download_logs SET downloaded_at = ?, status = 'started', file_size = COALESCE(?, file_size)
+        WHERE id = ?
+      `).run(Date.now(), fileSize, existing.id);
+      return existing.id;
+    }
+
     const id = this.generateId();
     const stmt = this.db.prepare(`
-      INSERT INTO download_logs (id, user_id, media_title, media_key, file_size, downloaded_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO download_logs (id, user_id, media_title, media_key, file_size, downloaded_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'started')
     `);
     stmt.run(id, userId, mediaTitle, mediaKey, fileSize, Date.now());
+    return id;
+  }
+
+  updateDownloadLogStatus(id: string, status: DownloadLogStatus): void {
+    this.db.prepare('UPDATE download_logs SET status = ? WHERE id = ?').run(status, id);
+  }
+
+  // Download token operations
+  createDownloadToken(
+    userId: string,
+    scopeType: DownloadScopeType,
+    ratingKey: string,
+    partKey?: string,
+    ttlMs: number = 24 * 60 * 60 * 1000
+  ): DownloadToken {
+    const id = this.generateId();
+    const token = crypto.randomBytes(32).toString('hex');
+    const createdAt = Date.now();
+    const expiresAt = createdAt + ttlMs;
+
+    this.db.prepare(`
+      INSERT INTO download_tokens (id, token, user_id, scope_type, rating_key, part_key, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, token, userId, scopeType, ratingKey, partKey ?? null, expiresAt, createdAt);
+
+    return { id, token, userId, scopeType, ratingKey, partKey, expiresAt, createdAt };
+  }
+
+  getDownloadToken(token: string): DownloadToken | undefined {
+    const row = this.db.prepare(
+      'SELECT * FROM download_tokens WHERE token = ? AND expires_at > ?'
+    ).get(token, Date.now()) as any;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      token: row.token,
+      userId: row.user_id,
+      scopeType: row.scope_type,
+      ratingKey: row.rating_key,
+      partKey: row.part_key ?? undefined,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+    };
+  }
+
+  cleanupExpiredDownloadTokens(): void {
+    const result = this.db.prepare('DELETE FROM download_tokens WHERE expires_at <= ?').run(Date.now());
+    if (result.changes > 0) {
+      logger.info(`Cleaned up ${result.changes} expired download tokens`);
+    }
   }
 
   getDownloadHistory(userId: string, limit: number = 50): any[] {
@@ -311,11 +423,12 @@ export class DatabaseService {
   }
 
   getDownloadStats(userId?: string): any {
-    let query = 'SELECT COUNT(*) as count, SUM(file_size) as total_size FROM download_logs';
+    // Only completed downloads count toward stats (#13)
+    let query = "SELECT COUNT(*) as count, SUM(file_size) as total_size FROM download_logs WHERE status = 'completed'";
     const params: any[] = [];
 
     if (userId) {
-      query += ' WHERE user_id = ?';
+      query += ' AND user_id = ?';
       params.push(userId);
     }
 
@@ -365,7 +478,7 @@ export class DatabaseService {
   }
 
   private generateToken(): string {
-    return `${Math.random().toString(36).substr(2)}${Math.random().toString(36).substr(2)}${Date.now().toString(36)}`;
+    return crypto.randomBytes(32).toString('hex');
   }
 
   close(): void {

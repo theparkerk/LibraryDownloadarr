@@ -1,4 +1,4 @@
-const CACHE_NAME = 'librarydownloadarr-v2';
+const CACHE_NAME = 'librarydownloadarr-v3';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -36,9 +36,11 @@ self.addEventListener('fetch', (event) => {
                            url.pathname.includes('/season/') ||
                            url.pathname.includes('/album/');
 
-  // For download requests, just fetch without caching
+  // For download requests, don't intercept at all — let the browser's
+  // download manager talk to the network directly. Proxying through
+  // respondWith(fetch()) ties the download's lifetime to the service
+  // worker, which mobile OSes kill aggressively, aborting large files.
   if (isDownloadRequest) {
-    event.respondWith(fetch(event.request));
     return;
   }
 

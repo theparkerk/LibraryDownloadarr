@@ -16,6 +16,33 @@ export interface AuthRequest extends Request {
   };
 }
 
+// Resolves a user id to the request-user shape, checking admin users first
+// then Plex OAuth users. Shared by session auth, the thumbnail query-token
+// path, and download-token auth.
+export const resolveUserById = (db: DatabaseService, userId: string): AuthRequest['user'] | undefined => {
+  const adminUser = db.getAdminUserById(userId);
+  if (adminUser) {
+    return {
+      id: adminUser.id,
+      username: adminUser.username,
+      isAdmin: adminUser.isAdmin,
+    };
+  }
+
+  const plexUser = db.getPlexUserById(userId);
+  if (plexUser) {
+    return {
+      id: plexUser.id,
+      username: plexUser.username,
+      isAdmin: plexUser.isAdmin,
+      plexToken: plexUser.plexToken,
+      serverUrl: plexUser.serverUrl,
+    };
+  }
+
+  return undefined;
+};
+
 export const createAuthMiddleware = (db: DatabaseService) => {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
@@ -31,31 +58,9 @@ export const createAuthMiddleware = (db: DatabaseService) => {
         return res.status(401).json({ error: 'Invalid or expired token' });
       }
 
-      // Try admin user first
-      const adminUser = db.getAdminUserById(session.userId);
-      if (adminUser) {
-        req.user = {
-          id: adminUser.id,
-          username: adminUser.username,
-          isAdmin: adminUser.isAdmin,
-        };
-        req.authSession = {
-          id: session.id,
-          token: session.token,
-        };
-        return next();
-      }
-
-      // Try plex user
-      const plexUser = db.getPlexUserById(session.userId);
-      if (plexUser) {
-        req.user = {
-          id: plexUser.id,
-          username: plexUser.username,
-          isAdmin: plexUser.isAdmin,
-          plexToken: plexUser.plexToken,
-          serverUrl: plexUser.serverUrl,
-        };
+      const user = resolveUserById(db, session.userId);
+      if (user) {
+        req.user = user;
         req.authSession = {
           id: session.id,
           token: session.token,

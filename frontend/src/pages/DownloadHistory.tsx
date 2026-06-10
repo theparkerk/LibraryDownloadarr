@@ -90,6 +90,9 @@ export const DownloadHistory: React.FC = () => {
                           File Size
                         </th>
                         <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-4 md:px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
                           Downloaded At
                         </th>
                       </tr>
@@ -103,6 +106,19 @@ export const DownloadHistory: React.FC = () => {
                           <td className="px-4 md:px-6 py-3 md:py-4 text-xs md:text-sm">{item.media_title}</td>
                           <td className="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-400">
                             {formatFileSize(item.file_size)}
+                          </td>
+                          <td className="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-xs md:text-sm">
+                            <span
+                              className={
+                                item.status === 'completed'
+                                  ? 'text-green-400'
+                                  : item.status === 'started'
+                                  ? 'text-primary-400'
+                                  : 'text-yellow-400'
+                              }
+                            >
+                              {item.status === 'started' ? 'in progress' : item.status || 'completed'}
+                            </span>
                           </td>
                           <td className="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-400">
                             {formatDate(item.downloaded_at)}

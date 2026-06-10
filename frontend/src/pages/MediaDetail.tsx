@@ -80,15 +80,13 @@ export const MediaDetail: React.FC = () => {
     }
   };
 
-  // Helper function to check if a download is in progress for a given part
-  const isDownloading = (partKey: string): boolean => {
-    return downloads.some(d => d.partKey === partKey && d.status === 'downloading');
-  };
-
-  // Helper function to get download progress for a given part
-  const getDownloadProgress = (partKey: string): number => {
-    const download = downloads.find(d => d.partKey === partKey);
-    return download?.progress || 0;
+  // A download is "busy" while we prepare the link and briefly after handing
+  // it to the browser's native downloader. Matches the part key for file
+  // downloads or the rating key for season/album zips.
+  const isDownloading = (key: string): boolean => {
+    return downloads.some(
+      d => (d.partKey === key || d.ratingKey === key) && d.status !== 'error'
+    );
   };
 
   const handleDownload = async (itemRatingKey: string, partKey: string, filename: string, itemTitle: string, fileSize?: number) => {
@@ -105,7 +103,7 @@ export const MediaDetail: React.FC = () => {
     }
 
     // Use the global download context with the specific item's rating key
-    await startDownload(itemRatingKey, partKey, filename, itemTitle);
+    await startDownload({ type: 'file', ratingKey: itemRatingKey, partKey }, filename, itemTitle);
   };
 
   const handleSeasonDownload = async (seasonRatingKey: string, seasonTitle: string) => {
@@ -124,13 +122,12 @@ export const MediaDetail: React.FC = () => {
         }
       }
 
-      const downloadUrl = api.getSeasonDownloadUrl(seasonRatingKey);
       const showName = media?.title || 'Unknown Show';
       const seasonNumber = seasons.find(s => s.ratingKey === seasonRatingKey)?.index || 0;
       const zipFilename = `${showName} - S${String(seasonNumber).padStart(2, '0')}.zip`;
 
       // Use the download context to track the season download
-      await startDownload(seasonRatingKey, downloadUrl, zipFilename, `${seasonTitle} (Full Season)`);
+      await startDownload({ type: 'season', ratingKey: seasonRatingKey }, zipFilename, `${seasonTitle} (Full Season)`);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start season download');
     }
@@ -152,11 +149,10 @@ export const MediaDetail: React.FC = () => {
         }
       }
 
-      const downloadUrl = api.getAlbumDownloadUrl(albumRatingKey);
       const zipFilename = `${albumTitle}.zip`;
 
       // Use the download context to track the album download
-      await startDownload(albumRatingKey, downloadUrl, zipFilename, `${albumTitle} (Full Album)`);
+      await startDownload({ type: 'album', ratingKey: albumRatingKey }, zipFilename, `${albumTitle} (Full Album)`);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start album download');
     }
@@ -275,12 +271,12 @@ export const MediaDetail: React.FC = () => {
                       {media.type === 'album' && tracks.length > 0 && (
                         <button
                           onClick={() => handleAlbumDownload(ratingKey!, media.title)}
-                          disabled={isDownloading(api.getAlbumDownloadUrl(ratingKey!))}
+                          disabled={isDownloading(ratingKey!)}
                           className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                           title="Download entire album as ZIP"
                         >
-                          {isDownloading(api.getAlbumDownloadUrl(ratingKey!))
-                            ? '⏳ Zipping...'
+                          {isDownloading(ratingKey!)
+                            ? '⏳ Starting...'
                             : '📦 Download Album'}
                         </button>
                       )}
@@ -325,17 +321,9 @@ export const MediaDetail: React.FC = () => {
                                     className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                                   >
                                     {isDownloading(track.Media![0].Part[0].key)
-                                      ? `${getDownloadProgress(track.Media![0].Part[0].key)}%`
+                                      ? 'Starting...'
                                       : 'Download'}
                                   </button>
-                                  {isDownloading(track.Media![0].Part[0].key) && (
-                                    <div className="w-32 h-2 bg-dark-200 rounded-full overflow-hidden">
-                                      <div
-                                        className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-300 ease-out"
-                                        style={{ width: `${getDownloadProgress(track.Media![0].Part[0].key)}%` }}
-                                      />
-                                    </div>
-                                  )}
                                 </div>
                               )}
                             </div>
@@ -387,17 +375,9 @@ export const MediaDetail: React.FC = () => {
                                     className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                                   >
                                     {isDownloading(episode.Media![0].Part[0].key)
-                                      ? `${getDownloadProgress(episode.Media![0].Part[0].key)}%`
+                                      ? 'Starting...'
                                       : 'Download'}
                                   </button>
-                                  {isDownloading(episode.Media![0].Part[0].key) && (
-                                    <div className="w-32 h-2 bg-dark-200 rounded-full overflow-hidden">
-                                      <div
-                                        className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-300 ease-out"
-                                        style={{ width: `${getDownloadProgress(episode.Media![0].Part[0].key)}%` }}
-                                      />
-                                    </div>
-                                  )}
                                 </div>
                               )}
                             </div>
@@ -441,12 +421,12 @@ export const MediaDetail: React.FC = () => {
                                     e.stopPropagation();
                                     handleSeasonDownload(season.ratingKey, season.title);
                                   }}
-                                  disabled={isDownloading(api.getSeasonDownloadUrl(season.ratingKey))}
+                                  disabled={isDownloading(season.ratingKey)}
                                   className="btn-primary ml-2 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap text-sm md:text-base px-3 md:px-4 py-2"
                                   title="Download entire season as ZIP"
                                 >
-                                  {isDownloading(api.getSeasonDownloadUrl(season.ratingKey))
-                                    ? '⏳ Zipping...'
+                                  {isDownloading(season.ratingKey)
+                                    ? '⏳ Starting...'
                                     : '📦 Season'}
                                 </button>
                               </div>
@@ -493,17 +473,9 @@ export const MediaDetail: React.FC = () => {
                                               className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
                                               {isDownloading(episode.Media![0].Part[0].key)
-                                                ? `${getDownloadProgress(episode.Media![0].Part[0].key)}%`
+                                                ? 'Starting...'
                                                 : 'Download'}
                                             </button>
-                                            {isDownloading(episode.Media![0].Part[0].key) && (
-                                              <div className="w-32 h-2 bg-dark-200 rounded-full overflow-hidden">
-                                                <div
-                                                  className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-300 ease-out"
-                                                  style={{ width: `${getDownloadProgress(episode.Media![0].Part[0].key)}%` }}
-                                                />
-                                              </div>
-                                            )}
                                           </div>
                                         )}
                                       </div>
@@ -553,17 +525,9 @@ export const MediaDetail: React.FC = () => {
                                       className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
                                       {isDownloading(part.key)
-                                        ? `${getDownloadProgress(part.key)}%`
+                                        ? 'Starting...'
                                         : 'Download'}
                                     </button>
-                                    {isDownloading(part.key) && (
-                                      <div className="w-32 h-2 bg-dark-200 rounded-full overflow-hidden">
-                                        <div
-                                          className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-300 ease-out"
-                                          style={{ width: `${getDownloadProgress(part.key)}%` }}
-                                        />
-                                      </div>
-                                    )}
                                   </div>
                                 ))}
                               </div>

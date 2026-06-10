@@ -1,9 +1,10 @@
-import { Router } from 'express';
-import { DatabaseService } from '../models/database';
+import { Router, Response, NextFunction } from 'express';
+import { DatabaseService, DownloadScopeType } from '../models/database';
 import { plexService } from '../services/plexService';
 import { logger } from '../utils/logger';
-import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
+import { AuthRequest, createAuthMiddleware, resolveUserById } from '../middleware/auth';
 import axios from 'axios';
+import contentDisposition from 'content-disposition';
 import https from 'https';
 import path from 'path';
 import { createZipStream, ZipFileEntry } from '../utils/zipUtils';
@@ -18,6 +19,44 @@ const httpsAgent = new https.Agent({
 export const createMediaRouter = (db: DatabaseService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
+
+  // Auth for download endpoints: a session Bearer header as usual, OR a
+  // scoped download token in ?dl=. The token path is what lets the
+  // browser's native download manager (which can't send headers) fetch
+  // files directly — required for streaming-to-disk on mobile (#16).
+  const createDownloadAuth = (scopeType: DownloadScopeType, ratingKeyParam: string) => {
+    return async (req: AuthRequest, res: Response, next: NextFunction) => {
+      if (req.headers.authorization) {
+        return authMiddleware(req, res, next);
+      }
+
+      const dl = req.query.dl;
+      if (typeof dl === 'string' && dl.length > 0) {
+        const downloadToken = db.getDownloadToken(dl);
+        const ratingKey = req.params[ratingKeyParam];
+        const partKeyMatches =
+          scopeType !== 'file' || downloadToken?.partKey === req.query.partKey;
+
+        if (
+          downloadToken &&
+          downloadToken.scopeType === scopeType &&
+          downloadToken.ratingKey === ratingKey &&
+          partKeyMatches
+        ) {
+          const user = resolveUserById(db, downloadToken.userId);
+          if (user) {
+            req.user = user;
+            return next();
+          }
+        }
+
+        logger.warn('Download token rejected', { scopeType, ratingKey });
+        return res.status(401).json({ error: 'Invalid or expired download link. Please start the download again.' });
+      }
+
+      return res.status(401).json({ error: 'No token provided' });
+    };
+  };
 
   // Helper function to format media title for download logs
   const formatMediaTitle = (metadata: any, libraryTitle?: string): string => {
@@ -267,6 +306,48 @@ export const createMediaRouter = (db: DatabaseService) => {
     }
   });
 
+  // Issue a scoped, expiring download token. The returned URL can be opened
+  // directly by the browser (no Authorization header needed), so the native
+  // download manager streams the file to disk instead of buffering in RAM.
+  router.post('/download-token', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { scopeType, ratingKey, partKey } = req.body as {
+        scopeType?: string;
+        ratingKey?: string;
+        partKey?: string;
+      };
+
+      if (scopeType !== 'file' && scopeType !== 'season' && scopeType !== 'album') {
+        return res.status(400).json({ error: 'scopeType must be file, season, or album' });
+      }
+      if (!ratingKey || typeof ratingKey !== 'string') {
+        return res.status(400).json({ error: 'ratingKey is required' });
+      }
+      if (scopeType === 'file' && (!partKey || typeof partKey !== 'string')) {
+        return res.status(400).json({ error: 'partKey is required for file downloads' });
+      }
+
+      const downloadToken = db.createDownloadToken(
+        req.user!.id,
+        scopeType,
+        ratingKey,
+        scopeType === 'file' ? partKey : undefined
+      );
+
+      let url: string;
+      if (scopeType === 'file') {
+        url = `/api/media/${encodeURIComponent(ratingKey)}/download?partKey=${encodeURIComponent(partKey!)}&dl=${downloadToken.token}`;
+      } else {
+        url = `/api/media/${scopeType}/${encodeURIComponent(ratingKey)}/download?dl=${downloadToken.token}`;
+      }
+
+      return res.json({ url, expiresAt: downloadToken.expiresAt });
+    } catch (error) {
+      logger.error('Failed to create download token', { error });
+      return res.status(500).json({ error: 'Failed to create download token' });
+    }
+  });
+
   // Get media metadata
   router.get('/:ratingKey', authMiddleware, async (req: AuthRequest, res) => {
     try {
@@ -360,7 +441,7 @@ export const createMediaRouter = (db: DatabaseService) => {
   });
 
   // Download media
-  router.get('/:ratingKey/download', authMiddleware, async (req: AuthRequest, res) => {
+  router.get('/:ratingKey/download', createDownloadAuth('file', 'ratingKey'), async (req: AuthRequest, res) => {
     try {
       const { ratingKey } = req.params;
       const { partKey } = req.query;
@@ -435,7 +516,32 @@ export const createMediaRouter = (db: DatabaseService) => {
         }
       }
 
+      // The permission check above ran against ratingKey, but the stream
+      // serves partKey — reject part keys that don't belong to this item so
+      // a token scoped to one item can't fetch another item's file
+      const parts = (metadata.Media || []).flatMap((m: any) => m.Part || []);
+      const matchedPart = parts.find((p: any) => p.key === partKey);
+      if (!matchedPart) {
+        logger.warn('Download rejected: partKey does not belong to ratingKey', {
+          userId: req.user?.id,
+          ratingKey,
+          partKey
+        });
+        return res.status(404).json({ error: 'File not found for this media item' });
+      }
+
       const downloadUrl = plexService.getDownloadUrl(partKey, token);
+
+      // Forward Range/If-Range so the browser's download manager can resume
+      // interrupted downloads — essential on flaky mobile connections (#16)
+      const rangeHeader = req.headers.range;
+      const upstreamHeaders: Record<string, string> = {};
+      if (typeof rangeHeader === 'string') {
+        upstreamHeaders['Range'] = rangeHeader;
+      }
+      if (typeof req.headers['if-range'] === 'string') {
+        upstreamHeaders['If-Range'] = req.headers['if-range'];
+      }
 
       // Stream the file through our server
       let response;
@@ -445,6 +551,7 @@ export const createMediaRouter = (db: DatabaseService) => {
           url: downloadUrl,
           responseType: 'stream',
           httpsAgent: httpsAgent,
+          headers: upstreamHeaders,
         });
       } catch (downloadError: any) {
         // If Plex returns 403, it means the user doesn't have download permission
@@ -462,6 +569,15 @@ export const createMediaRouter = (db: DatabaseService) => {
             error: 'Download not allowed. The Plex server has denied access to this file. Check your download permissions in Plex settings.'
           });
         }
+        if (downloadError.response?.status === 416) {
+          // Content-Range: bytes */<total> lets the browser repair a stale
+          // resume offset instead of giving up
+          const upstream416Range = downloadError.response.headers?.['content-range'];
+          if (upstream416Range) {
+            res.setHeader('Content-Range', upstream416Range);
+          }
+          return res.status(416).end();
+        }
         // Re-throw other errors
         throw downloadError;
       }
@@ -471,26 +587,68 @@ export const createMediaRouter = (db: DatabaseService) => {
         ? parseInt(response.headers['content-length'], 10)
         : undefined;
 
-      // Log the download with formatted title including library name and actual file size
       const formattedTitle = formatMediaTitle(metadata, libraryTitle);
-      db.logDownload(
+      const isResume = typeof rangeHeader === 'string' && !/^bytes=0-/.test(rangeHeader);
+
+      // Log the download. logDownload reuses the recent non-completed row
+      // for this user+media, so retries and ranged resumes update one
+      // history entry instead of piling up duplicates (#13). Resume
+      // requests don't pass fileSize — the partial content-length would
+      // overwrite the real total.
+      const logId = db.logDownload(
         req.user!.id,
         formattedTitle,
         ratingKey,
-        fileSize
+        isResume ? undefined : fileSize
       );
 
-      // Set headers for download
-      const filename = metadata.Media?.[0]?.Part?.[0]?.file.split('/').pop() || 'download';
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      // Track the actual outcome so history doesn't record aborted streams
+      // as successful downloads (#13)
+      const contentRange = response.headers['content-range'] as string | undefined;
+      const reachesEof = (() => {
+        if (response.status !== 206) return true; // full-body response
+        const m = contentRange?.match(/bytes \d+-(\d+)\/(\d+)/);
+        return m ? parseInt(m[1], 10) + 1 === parseInt(m[2], 10) : false;
+      })();
+
+      res.on('finish', () => {
+        if (reachesEof) {
+          db.updateDownloadLogStatus(logId, 'completed');
+        }
+        // else: mid-file chunk delivered; row stays 'started' for the next resume
+      });
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          db.updateDownloadLogStatus(logId, 'interrupted');
+        }
+      });
+
+      // Set headers for download. contentDisposition() RFC-6266-encodes the
+      // name — raw quotes or non-ASCII characters used to make setHeader
+      // throw, killing the download entirely (#18).
+      const filename = (matchedPart.file ? path.basename(matchedPart.file) : '') || 'download';
+      res.status(response.status);
+      res.setHeader('Content-Disposition', contentDisposition(filename));
       res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
+      res.setHeader('Accept-Ranges', 'bytes');
+      if (contentRange) {
+        res.setHeader('Content-Range', contentRange);
+      }
+      // Pass validators through so the browser can send a correct If-Range
+      // on resume
+      if (response.headers['etag']) {
+        res.setHeader('ETag', response.headers['etag']);
+      }
+      if (response.headers['last-modified']) {
+        res.setHeader('Last-Modified', response.headers['last-modified']);
+      }
       if (fileSize) {
         res.setHeader('Content-Length', fileSize.toString());
       }
 
       response.data.pipe(res);
 
-      logger.info(`Download started for ${formattedTitle} by user ${req.user?.username}`);
+      logger.info(`Download ${isResume ? 'resumed' : 'started'} for ${formattedTitle} by user ${req.user?.username}`);
       return;
     } catch (error) {
       logger.error('Download failed', { error });
@@ -594,7 +752,7 @@ export const createMediaRouter = (db: DatabaseService) => {
   });
 
   // Download entire season as zip
-  router.get('/season/:seasonRatingKey/download', authMiddleware, async (req: AuthRequest, res) => {
+  router.get('/season/:seasonRatingKey/download', createDownloadAuth('season', 'seasonRatingKey'), async (req: AuthRequest, res) => {
     try {
       const { seasonRatingKey } = req.params;
 
@@ -680,15 +838,19 @@ export const createMediaRouter = (db: DatabaseService) => {
       const seasonNumber = seasonMetadata.index || seasonMetadata.parentIndex || 0;
       const zipFilename = `${showName} - S${String(seasonNumber).padStart(2, '0')}.zip`;
 
-      // Log the download
+      // Log the download and track its outcome (#13)
       const libraryTitle = seasonMetadata.librarySectionTitle || 'Unknown Library';
       const downloadTitle = `${libraryTitle} - ${showName} - ${seasonMetadata.title} (${files.length} episodes)`;
-      db.logDownload(
+      const logId = db.logDownload(
         req.user!.id,
         downloadTitle,
         seasonRatingKey,
         totalSize
       );
+      res.on('finish', () => db.updateDownloadLogStatus(logId, 'completed'));
+      res.on('close', () => {
+        if (!res.writableEnded) db.updateDownloadLogStatus(logId, 'interrupted');
+      });
 
       logger.info(`Season download started: ${downloadTitle} by user ${req.user?.username}`);
 
@@ -706,7 +868,7 @@ export const createMediaRouter = (db: DatabaseService) => {
   });
 
   // Download entire album as zip
-  router.get('/album/:albumRatingKey/download', authMiddleware, async (req: AuthRequest, res) => {
+  router.get('/album/:albumRatingKey/download', createDownloadAuth('album', 'albumRatingKey'), async (req: AuthRequest, res) => {
     try {
       const { albumRatingKey } = req.params;
 
@@ -790,15 +952,19 @@ export const createMediaRouter = (db: DatabaseService) => {
       // Generate zip filename: "Album.zip"
       const zipFilename = `${albumMetadata.title}.zip`;
 
-      // Log the download
+      // Log the download and track its outcome (#13)
       const libraryTitle = albumMetadata.librarySectionTitle || 'Unknown Library';
       const downloadTitle = `${libraryTitle} - ${albumMetadata.title} (${files.length} tracks)`;
-      db.logDownload(
+      const logId = db.logDownload(
         req.user!.id,
         downloadTitle,
         albumRatingKey,
         totalSize
       );
+      res.on('finish', () => db.updateDownloadLogStatus(logId, 'completed'));
+      res.on('close', () => {
+        if (!res.writableEnded) db.updateDownloadLogStatus(logId, 'interrupted');
+      });
 
       logger.info(`Album download started: ${downloadTitle} by user ${req.user?.username}`);
 

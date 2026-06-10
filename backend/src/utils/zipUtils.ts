@@ -1,6 +1,7 @@
 import archiver from 'archiver';
 import { Response } from 'express';
 import axios from 'axios';
+import contentDisposition from 'content-disposition';
 import { logger } from './logger';
 import https from 'https';
 
@@ -39,7 +40,9 @@ export const createZipStream = async (
 
     // Set response headers
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
+    // RFC-6266-encode the name; show titles with quotes/colons/non-ASCII
+    // characters used to make setHeader throw and fail the download (#18)
+    res.setHeader('Content-Disposition', contentDisposition(zipFilename));
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
