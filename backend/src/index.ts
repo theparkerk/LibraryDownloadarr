@@ -12,14 +12,21 @@ import { createMediaRouter } from './routes/media';
 import { createServersRouter } from './routes/servers';
 import { createSettingsRouter } from './routes/settings';
 import { createLogsRouter } from './routes/logs';
+import { TranscodeService } from './services/transcodeService';
 
 // Initialize database
 const db = new DatabaseService(config.database.path);
 
-// Cleanup expired sessions and download tokens every hour
+// Transcode (device-quality conversion) service; recover from any jobs left
+// mid-flight by a restart
+const transcodeService = new TranscodeService(db);
+transcodeService.recoverOnStartup();
+
+// Cleanup expired sessions, download tokens, and aged transcode files hourly
 setInterval(() => {
   db.cleanupExpiredSessions();
   db.cleanupExpiredDownloadTokens();
+  transcodeService.cleanupExpired();
 }, 60 * 60 * 1000);
 
 // Create Express app
@@ -50,7 +57,7 @@ app.get('/api/health', (_req, res) => {
 // Routes
 app.use('/api/auth', createAuthRouter(db));
 app.use('/api/libraries', createLibrariesRouter(db));
-app.use('/api/media', createMediaRouter(db));
+app.use('/api/media', createMediaRouter(db, transcodeService));
 app.use('/api/servers', createServersRouter(db));
 app.use('/api/settings', createSettingsRouter(db));
 app.use('/api/logs', createLogsRouter(db));
@@ -78,6 +85,7 @@ const server = app.listen(config.server.port, () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM signal received: closing HTTP server');
+  transcodeService.shutdown();
   server.close(() => {
     logger.info('HTTP server closed');
     db.close();
@@ -87,6 +95,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   logger.info('SIGINT signal received: closing HTTP server');
+  transcodeService.shutdown();
   server.close(() => {
     logger.info('HTTP server closed');
     db.close();

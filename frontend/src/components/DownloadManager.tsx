@@ -35,6 +35,21 @@ export const DownloadManager: React.FC = () => {
             </div>
           )}
 
+          {download.status === 'converting' && (
+            <>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-gray-400">Converting on server…</span>
+                <span className="text-primary-400 font-semibold">{download.progress ?? 0}%</span>
+              </div>
+              <div className="w-full h-2 bg-dark-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-500 ease-out"
+                  style={{ width: `${download.progress ?? 0}%` }}
+                />
+              </div>
+            </>
+          )}
+
           {download.status === 'started' && (
             <div className="text-xs text-green-400">
               <span>✓ Download started — check your browser's downloads</span>

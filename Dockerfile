@@ -33,6 +33,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# ffmpeg remuxes Plex's transcoded HLS stream into a downloadable MP4
+# (device-quality conversions)
+RUN apk add --no-cache ffmpeg
+
 # Install production dependencies for backend
 COPY backend/package*.json ./
 RUN npm ci --production
@@ -43,8 +47,8 @@ COPY --from=backend-builder /app/backend/dist ./dist
 # Copy built frontend
 COPY --from=frontend-builder /app/frontend/dist ./public
 
-# Create data directory
-RUN mkdir -p /app/data /app/logs
+# Create data directory (transcode-cache holds pre-built converted files)
+RUN mkdir -p /app/data /app/data/transcode-cache /app/logs
 
 # Set environment variables
 ENV NODE_ENV=production

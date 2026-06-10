@@ -3,12 +3,16 @@ import { DatabaseService, DownloadScopeType } from '../models/database';
 import { createPlexClient } from '../services/plexService';
 import { resolveServer, ServerContext } from '../services/serverRegistry';
 import { searchAllServers, getRecentlyAddedAllServers } from '../services/crossServerService';
+import { TranscodeService } from '../services/transcodeService';
+import { getPreset } from '../services/transcodePresets';
+import { config } from '../config';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware, resolveUserById } from '../middleware/auth';
 import axios from 'axios';
 import contentDisposition from 'content-disposition';
 import https from 'https';
 import path from 'path';
+import fs from 'fs';
 import { createZipStream, ZipFileEntry } from '../utils/zipUtils';
 
 // HTTPS agent that bypasses SSL certificate validation for local Plex servers
@@ -18,7 +22,7 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: false
 });
 
-export const createMediaRouter = (db: DatabaseService) => {
+export const createMediaRouter = (db: DatabaseService, transcodeService: TranscodeService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
 
@@ -367,6 +371,171 @@ export const createMediaRouter = (db: DatabaseService) => {
     } catch (error) {
       logger.error('Failed to create download token', { error });
       return res.status(500).json({ error: 'Failed to create download token' });
+    }
+  });
+
+  // Start a device-quality conversion job. Pre-builds a smaller MP4 on the
+  // server (Plex does the encode) for download, so devices don't store the
+  // full-size original.
+  router.post('/transcode', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { ratingKey, quality } = req.body as { ratingKey?: string; quality?: string };
+
+      // ratingKey is interpolated into the Plex transcode path — keep it numeric
+      if (!ratingKey || typeof ratingKey !== 'string' || !/^\d+$/.test(ratingKey)) {
+        return res.status(400).json({ error: 'A numeric ratingKey is required' });
+      }
+      const preset = quality ? getPreset(quality) : undefined;
+      if (!preset) {
+        return res.status(400).json({ error: 'Unknown quality preset' });
+      }
+
+      // resolveServerContext rejects 'all' and resolves a concrete vouched server
+      const { token, serverUrl, serverName, isHome, error } = await resolveServerContext(req);
+      if (error) return res.status(403).json({ error });
+      if (!token || !serverUrl) return res.status(500).json({ error: 'Plex server not configured' });
+
+      const plex = createPlexClient(serverUrl);
+      const metadata = await plex.getMediaMetadata(ratingKey, token);
+      if (!metadata) return res.status(404).json({ error: 'Media not found' });
+      if (metadata.type !== 'movie' && metadata.type !== 'episode') {
+        return res.status(400).json({ error: 'Only movies and episodes can be converted' });
+      }
+
+      // Same allowSync gate as the file download — admin bypass is home-only
+      const isExplicitlyDisabled =
+        metadata.allowSync === false || metadata.allowSync === 0 || metadata.allowSync === '0';
+      if (isExplicitlyDisabled && !(isHome && req.user?.isAdmin)) {
+        return res.status(403).json({ error: 'Download not allowed for this item.' });
+      }
+
+      const serverId = isHome ? undefined : (typeof req.query.serverId === 'string' ? req.query.serverId : undefined) ?? (typeof req.body?.serverId === 'string' ? req.body.serverId : undefined);
+
+      // Attach to an existing in-flight/ready job rather than re-transcoding
+      const existing = db.findReusableTranscodeJob(req.user!.id, ratingKey, serverId, preset.id);
+      if (existing) {
+        return res.json({ jobId: existing.id, status: existing.status, reused: true });
+      }
+
+      // Bound the queue so a user can't pile up unlimited conversions
+      if (transcodeService.pendingCount() >= config.transcode.maxQueue) {
+        return res.status(429).json({ error: 'Too many conversions in progress. Try again shortly.' });
+      }
+
+      const job = db.createTranscodeJob(req.user!.id, ratingKey, serverId, preset.id, metadata.title || 'download');
+      const durationSec = metadata.duration ? metadata.duration / 1000 : undefined;
+      transcodeService.enqueue({ id: job.id, ratingKey, serverUrl, token, preset, durationSec });
+      logger.info('Transcode requested', { jobId: job.id, ratingKey, quality: preset.id, server: serverName });
+      return res.json({ jobId: job.id, status: 'queued', reused: false });
+    } catch (error) {
+      logger.error('Failed to start transcode', { error });
+      return res.status(500).json({ error: 'Failed to start conversion' });
+    }
+  });
+
+  // Poll a conversion job's status (owner-scoped)
+  router.get('/transcode/:jobId', authMiddleware, async (req: AuthRequest, res) => {
+    const job = db.getTranscodeJob(req.params.jobId);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    return res.json({
+      job: {
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        quality: job.quality,
+        title: job.title,
+        fileSize: job.fileSize,
+        error: job.error,
+      },
+    });
+  });
+
+  // Mint a headerless download link for a finished conversion (so the
+  // browser's native downloader can fetch it on mobile)
+  router.post('/transcode/:jobId/download-token', authMiddleware, async (req: AuthRequest, res) => {
+    const job = db.getTranscodeJob(req.params.jobId);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    if (job.status !== 'ready') {
+      return res.status(409).json({ error: 'Conversion is not ready yet' });
+    }
+    const dt = db.createDownloadToken(req.user!.id, 'transcode', job.id);
+    return res.json({
+      url: `/api/media/transcode/${encodeURIComponent(job.id)}/download?dl=${dt.token}`,
+      expiresAt: dt.expiresAt,
+    });
+  });
+
+  // Stream a finished conversion's temp file with Range/resume. Auth via a
+  // session Bearer (owner) OR a scoped ?dl= transcode token for this jobId.
+  router.get('/transcode/:jobId/download', async (req: AuthRequest, res) => {
+    try {
+      const { jobId } = req.params;
+      let userId: string | undefined;
+
+      const dl = req.query.dl;
+      if (typeof dl === 'string' && dl.length > 0) {
+        const dt = db.getDownloadToken(dl);
+        if (dt && dt.scopeType === 'transcode' && dt.ratingKey === jobId) {
+          userId = dt.userId;
+        }
+      } else if (req.headers.authorization?.startsWith('Bearer ')) {
+        const session = db.getSessionByToken(req.headers.authorization.substring(7));
+        if (session) userId = session.userId;
+      }
+      if (!userId) {
+        return res.status(401).json({ error: 'Invalid or expired download link.' });
+      }
+
+      const job = db.getTranscodeJob(jobId);
+      if (!job || job.userId !== userId) {
+        return res.status(404).json({ error: 'Conversion not found' });
+      }
+      if (job.status !== 'ready' || !job.outputPath || !fs.existsSync(job.outputPath)) {
+        return res.status(409).json({ error: 'Conversion is not ready (it may have expired — start it again).' });
+      }
+
+      const size = fs.statSync(job.outputPath).size;
+      const safeTitle = (job.title || 'download').replace(/[\\/:*?"<>|]+/g, '_');
+      const filename = `${safeTitle} (${job.quality}).mp4`;
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Disposition', contentDisposition(filename));
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      const range = req.headers.range;
+      const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (rangeMatch) {
+        let start: number;
+        let end: number;
+        if (rangeMatch[1] === '' && rangeMatch[2] !== '') {
+          // Suffix range: last N bytes (bytes=-N)
+          const n = parseInt(rangeMatch[2], 10);
+          start = Math.max(0, size - n);
+          end = size - 1;
+        } else {
+          start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0;
+          end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : size - 1;
+        }
+        if (start >= size || end >= size || start > end) {
+          res.setHeader('Content-Range', `bytes */${size}`);
+          return res.status(416).end();
+        }
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+        res.setHeader('Content-Length', end - start + 1);
+        fs.createReadStream(job.outputPath, { start, end }).pipe(res);
+      } else {
+        res.setHeader('Content-Length', size);
+        fs.createReadStream(job.outputPath).pipe(res);
+      }
+      return;
+    } catch (error) {
+      logger.error('Transcode download failed', { error });
+      if (!res.headersSent) return res.status(500).json({ error: 'Download failed' });
+      return;
     }
   });
 

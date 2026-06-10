@@ -6,6 +6,7 @@ import { api, getSelectedServerId } from '../services/api';
 import { MediaItem, SourceRef } from '../types';
 import { useDownloads } from '../contexts/DownloadContext';
 import { useMobileMenu } from '../hooks/useMobileMenu';
+import { QualityMenu, QualityChoice } from '../components/QualityMenu';
 
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
@@ -130,10 +131,17 @@ export const MediaDetail: React.FC = () => {
     );
   };
 
-  const handleDownload = async (itemRatingKey: string, partKey: string, filename: string, itemTitle: string, fileSize?: number) => {
-    // Check file size and warn if over 10GB
+  const handleDownload = async (
+    itemRatingKey: string,
+    partKey: string,
+    filename: string,
+    itemTitle: string,
+    fileSize?: number,
+    quality: QualityChoice = 'original'
+  ) => {
+    // Only warn about size for original downloads — converted files are small
     const tenGB = 10737418240;
-    if (fileSize && fileSize > tenGB) {
+    if (quality === 'original' && fileSize && fileSize > tenGB) {
       const sizeGB = (fileSize / 1073741824).toFixed(2);
       const confirmed = window.confirm(
         `This file is ${sizeGB} GB. Large downloads may take a long time and use significant bandwidth.\n\nDo you want to continue?`
@@ -143,8 +151,19 @@ export const MediaDetail: React.FC = () => {
       }
     }
 
-    // Use the global download context with the specific item's rating key
-    await startDownload({ type: 'file', ratingKey: itemRatingKey, partKey, serverId: srcServerId }, filename, itemTitle);
+    // Use the global download context with the specific item's rating key.
+    // A non-original quality routes through a server-side conversion job.
+    await startDownload(
+      {
+        type: 'file',
+        ratingKey: itemRatingKey,
+        partKey,
+        serverId: srcServerId,
+        quality: quality === 'original' ? undefined : quality,
+      },
+      filename,
+      itemTitle
+    );
   };
 
   const handleSeasonDownload = async (seasonRatingKey: string, seasonTitle: string) => {
@@ -425,23 +444,19 @@ export const MediaDetail: React.FC = () => {
                               </div>
                               {episode.Media?.[0]?.Part?.[0] && (
                                 <div className="flex flex-col items-end gap-2">
-                                  <button
-                                    onClick={() =>
+                                  <QualityMenu
+                                    busy={isDownloading(episode.Media![0].Part[0].key)}
+                                    onSelect={(q) =>
                                       handleDownload(
                                         episode.ratingKey,
                                         episode.Media![0].Part[0].key,
                                         episode.Media![0].Part[0].file.split('/').pop() || 'download',
                                         episode.title,
-                                        episode.Media![0].Part[0].size
+                                        episode.Media![0].Part[0].size,
+                                        q
                                       )
                                     }
-                                    disabled={isDownloading(episode.Media![0].Part[0].key)}
-                                    className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
-                                  >
-                                    {isDownloading(episode.Media![0].Part[0].key)
-                                      ? 'Starting...'
-                                      : 'Download'}
-                                  </button>
+                                  />
                                 </div>
                               )}
                             </div>
@@ -523,23 +538,19 @@ export const MediaDetail: React.FC = () => {
                                         </div>
                                         {episode.Media?.[0]?.Part?.[0] && (
                                           <div className="flex flex-col items-end gap-2">
-                                            <button
-                                              onClick={() =>
+                                            <QualityMenu
+                                              busy={isDownloading(episode.Media![0].Part[0].key)}
+                                              onSelect={(q) =>
                                                 handleDownload(
                                                   episode.ratingKey,
                                                   episode.Media![0].Part[0].key,
                                                   episode.Media![0].Part[0].file.split('/').pop() || 'download',
                                                   episode.title,
-                                                  episode.Media![0].Part[0].size
+                                                  episode.Media![0].Part[0].size,
+                                                  q
                                                 )
                                               }
-                                              disabled={isDownloading(episode.Media![0].Part[0].key)}
-                                              className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
-                                            >
-                                              {isDownloading(episode.Media![0].Part[0].key)
-                                                ? 'Starting...'
-                                                : 'Download'}
-                                            </button>
+                                            />
                                           </div>
                                         )}
                                       </div>
@@ -575,23 +586,19 @@ export const MediaDetail: React.FC = () => {
                                 </div>
                                 {mediaPart.Part.map((part, partIdx) => (
                                   <div key={partIdx} className="flex flex-col items-end gap-2">
-                                    <button
-                                      onClick={() =>
+                                    <QualityMenu
+                                      busy={isDownloading(part.key)}
+                                      onSelect={(q) =>
                                         handleDownload(
                                           media.ratingKey,
                                           part.key,
                                           part.file.split('/').pop() || 'download',
                                           media.title,
-                                          part.size
+                                          part.size,
+                                          q
                                         )
                                       }
-                                      disabled={isDownloading(part.key)}
-                                      className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                      {isDownloading(part.key)
-                                        ? 'Starting...'
-                                        : 'Download'}
-                                    </button>
+                                    />
                                   </div>
                                 ))}
                               </div>

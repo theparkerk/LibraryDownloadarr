@@ -13,6 +13,20 @@ export const config = {
   database: {
     path: process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'librarydownloadarr.db'),
   },
+  transcode: {
+    // Temp dir for pre-built converted downloads. Defaults next to the DB so
+    // it lives on the same mounted /app/data volume in Docker.
+    tempDir:
+      process.env.TRANSCODE_TEMP_DIR ||
+      path.join(path.dirname(process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'x')), 'transcode-cache'),
+    // Software transcode is heavy; one at a time by default
+    maxConcurrent: parseInt(process.env.TRANSCODE_MAX_CONCURRENT || '1', 10),
+    maxQueue: parseInt(process.env.TRANSCODE_MAX_QUEUE || '10', 10),
+    // A ready file is deleted this long after it became ready (and on download)
+    fileTtlMs: parseInt(process.env.TRANSCODE_FILE_TTL_MS || `${6 * 60 * 60 * 1000}`, 10),
+    // Kill a job whose ffmpeg makes no progress for this long (stalled session)
+    stallTimeoutMs: parseInt(process.env.TRANSCODE_STALL_MS || `${5 * 60 * 1000}`, 10),
+  },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
   },

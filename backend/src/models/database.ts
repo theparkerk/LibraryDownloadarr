@@ -45,7 +45,9 @@ export interface Settings {
   updatedAt: number;
 }
 
-export type DownloadScopeType = 'file' | 'season' | 'album';
+// 'transcode' tokens authorize the headerless download of a finished
+// transcode job's temp file; ratingKey holds the jobId in that case.
+export type DownloadScopeType = 'file' | 'season' | 'album' | 'transcode';
 
 export interface DownloadToken {
   id: string;
@@ -60,6 +62,25 @@ export interface DownloadToken {
 }
 
 export type DownloadLogStatus = 'started' | 'completed' | 'interrupted' | 'failed';
+
+export type TranscodeJobStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
+
+export interface TranscodeJob {
+  id: string;
+  userId: string;
+  ratingKey: string;
+  serverId?: string;
+  quality: string;
+  title: string;
+  status: TranscodeJobStatus;
+  progress: number; // 0..100
+  outputPath?: string;
+  fileSize?: number;
+  durationSec?: number;
+  error?: string;
+  createdAt: number;
+  readyAt?: number;
+}
 
 export class DatabaseService {
   private db: Database.Database;
@@ -211,6 +232,28 @@ export class DatabaseService {
       logger.info('Adding server_id column to download_tokens table');
       this.db.exec('ALTER TABLE download_tokens ADD COLUMN server_id TEXT');
     }
+
+    // Server-side transcode jobs: a converted ("device quality") download is
+    // pre-built to a temp file by ffmpeg, tracked here for progress polling
+    // and reuse/dedup.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS transcode_jobs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        rating_key TEXT NOT NULL,
+        server_id TEXT,
+        quality TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        output_path TEXT,
+        file_size INTEGER,
+        duration_sec REAL,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        ready_at INTEGER
+      )
+    `);
 
     logger.info('Database tables initialized');
   }
@@ -428,6 +471,111 @@ export class DatabaseService {
     if (result.changes > 0) {
       logger.info(`Cleaned up ${result.changes} expired download tokens`);
     }
+  }
+
+  // Transcode job operations
+  private mapTranscodeJob(row: any): TranscodeJob {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      ratingKey: row.rating_key,
+      serverId: row.server_id ?? undefined,
+      quality: row.quality,
+      title: row.title,
+      status: row.status,
+      progress: row.progress,
+      outputPath: row.output_path ?? undefined,
+      fileSize: row.file_size ?? undefined,
+      durationSec: row.duration_sec ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      readyAt: row.ready_at ?? undefined,
+    };
+  }
+
+  createTranscodeJob(
+    userId: string,
+    ratingKey: string,
+    serverId: string | undefined,
+    quality: string,
+    title: string
+  ): TranscodeJob {
+    const id = this.generateId();
+    const createdAt = Date.now();
+    this.db.prepare(`
+      INSERT INTO transcode_jobs (id, user_id, rating_key, server_id, quality, title, status, progress, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?)
+    `).run(id, userId, ratingKey, serverId ?? null, quality, title, createdAt);
+    return { id, userId, ratingKey, serverId, quality, title, status: 'queued', progress: 0, createdAt };
+  }
+
+  getTranscodeJob(id: string): TranscodeJob | undefined {
+    const row = this.db.prepare('SELECT * FROM transcode_jobs WHERE id = ?').get(id) as any;
+    return row ? this.mapTranscodeJob(row) : undefined;
+  }
+
+  // Reuse a recent in-flight or ready job for the same content+server+quality
+  // so a double-click or a second family member doesn't re-transcode.
+  findReusableTranscodeJob(
+    userId: string,
+    ratingKey: string,
+    serverId: string | undefined,
+    quality: string
+  ): TranscodeJob | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM transcode_jobs
+      WHERE user_id = ? AND rating_key = ? AND quality = ?
+        AND ((server_id IS NULL AND ? IS NULL) OR server_id = ?)
+        AND status IN ('queued', 'processing', 'ready')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(userId, ratingKey, quality, serverId ?? null, serverId ?? null) as any;
+    return row ? this.mapTranscodeJob(row) : undefined;
+  }
+
+  updateTranscodeJobProgress(id: string, progress: number): void {
+    this.db.prepare('UPDATE transcode_jobs SET progress = ? WHERE id = ?').run(Math.round(progress), id);
+  }
+
+  setTranscodeJobProcessing(id: string, durationSec?: number): void {
+    this.db.prepare(
+      "UPDATE transcode_jobs SET status = 'processing', duration_sec = COALESCE(?, duration_sec) WHERE id = ?"
+    ).run(durationSec ?? null, id);
+  }
+
+  setTranscodeJobReady(id: string, outputPath: string, fileSize: number): void {
+    this.db.prepare(
+      "UPDATE transcode_jobs SET status = 'ready', progress = 100, output_path = ?, file_size = ?, ready_at = ? WHERE id = ?"
+    ).run(outputPath, fileSize, Date.now(), id);
+  }
+
+  setTranscodeJobFailed(id: string, error: string): void {
+    this.db.prepare("UPDATE transcode_jobs SET status = 'failed', error = ? WHERE id = ?").run(error, id);
+  }
+
+  setTranscodeJobStatus(id: string, status: TranscodeJobStatus): void {
+    this.db.prepare('UPDATE transcode_jobs SET status = ? WHERE id = ?').run(status, id);
+  }
+
+  // Jobs left mid-flight by a restart (so the service can fail/sweep them)
+  getInterruptedTranscodeJobs(): TranscodeJob[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM transcode_jobs WHERE status IN ('queued', 'processing')"
+    ).all() as any[];
+    return rows.map((r) => this.mapTranscodeJob(r));
+  }
+
+  // Ready jobs whose temp file has aged out
+  getExpiredTranscodeJobs(maxAgeMs: number): TranscodeJob[] {
+    const cutoff = Date.now() - maxAgeMs;
+    const rows = this.db.prepare(
+      "SELECT * FROM transcode_jobs WHERE status = 'ready' AND ready_at IS NOT NULL AND ready_at < ?"
+    ).all(cutoff) as any[];
+    return rows.map((r) => this.mapTranscodeJob(r));
+  }
+
+  deleteTranscodeJob(id: string): void {
+    this.db.prepare('DELETE FROM transcode_jobs WHERE id = ?').run(id);
   }
 
   getDownloadHistory(userId: string, limit: number = 50): any[] {

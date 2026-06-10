@@ -237,6 +237,40 @@ class ApiClient {
     return response.data;
   }
 
+  // Device-quality conversion (transcode) jobs
+  async startTranscode(
+    ratingKey: string,
+    quality: string,
+    serverId?: string
+  ): Promise<{ jobId: string; status: string; reused: boolean }> {
+    const response = await this.client.post<{ jobId: string; status: string; reused: boolean }>(
+      '/media/transcode',
+      { ratingKey, quality },
+      { params: serverId ? { serverId } : undefined }
+    );
+    return response.data;
+  }
+
+  async getTranscodeJob(jobId: string): Promise<{
+    id: string;
+    status: 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
+    progress: number;
+    quality: string;
+    title: string;
+    fileSize?: number;
+    error?: string;
+  }> {
+    const response = await this.client.get<{ job: any }>(`/media/transcode/${jobId}`);
+    return response.data.job;
+  }
+
+  async transcodeDownloadUrl(jobId: string): Promise<{ url: string; expiresAt: number }> {
+    const response = await this.client.post<{ url: string; expiresAt: number }>(
+      `/media/transcode/${jobId}/download-token`
+    );
+    return response.data;
+  }
+
   async getSeasonSize(
     seasonRatingKey: string,
     serverId?: string
