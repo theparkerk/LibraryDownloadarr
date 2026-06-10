@@ -23,7 +23,11 @@ export const QualityMenu: React.FC<QualityMenuProps> = ({ busy, onSelect }) => {
         // value is controlled to "" so the placeholder shows again next render
       }}
       aria-label="Download quality"
-      className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap appearance-none pr-7"
+      // Solid background (not btn-primary's gradient): a CSS gradient is a
+      // background-image, which would collide with the chevron background-image
+      // and leave white-on-white text on iOS. bg-primary-500 is a real
+      // background-color, so both coexist.
+      className="appearance-none cursor-pointer rounded-lg px-4 py-2 pr-9 text-sm font-medium text-white whitespace-nowrap bg-primary-500 hover:bg-primary-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-dark"
       style={{
         backgroundImage:
           "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='white' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E\")",

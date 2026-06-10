@@ -109,6 +109,9 @@ export class TranscodeService {
       '-i', url,
       '-c', 'copy',
       '-movflags', '+faststart',
+      // Output goes to a .part file; ffmpeg can't infer the muxer from that
+      // extension, so name it explicitly
+      '-f', 'mp4',
       '-y',
       out,
     ];
@@ -168,7 +171,9 @@ export class TranscodeService {
           this.db.setTranscodeJobFailed(spec.id, `finalize failed: ${e.message}`);
         }
       } else {
-        this.db.setTranscodeJobFailed(spec.id, stderr.trim().split('\n').pop() || `ffmpeg exited ${code}`);
+        const reason = stderr.trim().split('\n').pop() || `ffmpeg exited ${code}`;
+        logger.warn('Transcode job failed', { jobId: spec.id, code, reason });
+        this.db.setTranscodeJobFailed(spec.id, reason);
         this.safeUnlink(out);
         this.stopPlexSession(spec);
       }
