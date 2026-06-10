@@ -144,6 +144,9 @@ export class TranscodeService {
       '-progress', 'pipe:1',
       // HLS over https (plex.direct) needs the protocol whitelist
       '-protocol_whitelist', 'file,crypto,data,http,https,tcp,tls',
+      // Fail a stalled network read after 60s instead of hanging forever when
+      // a remote Plex session dies mid-stream (µs).
+      '-rw_timeout', '60000000',
       '-i', url,
       ...codecArgs,
       '-movflags', '+faststart',
@@ -159,25 +162,33 @@ export class TranscodeService {
     this.active.set(spec.id, { child, spec });
 
     let stderr = '';
-    let lastProgressAt = Date.now();
+    let lastAdvanceAt = Date.now();
+    let lastOutTime = -1;
 
-    // Watchdog: kill a stalled job (Plex session died / no segments flowing)
+    // Watchdog: kill a job whose actual output time hasn't advanced for a
+    // while (remote Plex session died / segments stopped flowing). Keyed on
+    // real progress, NOT any ffmpeg output — `-progress` emits keepalive
+    // lines even while stuck, which would otherwise reset the timer forever.
     const watchdog = setInterval(() => {
-      if (Date.now() - lastProgressAt > config.transcode.stallTimeoutMs) {
+      if (Date.now() - lastAdvanceAt > config.transcode.stallTimeoutMs) {
         logger.warn('Transcode job stalled; killing', { jobId: spec.id });
-        this.fail(spec, 'Transcode stalled (no progress)');
+        this.fail(spec, 'Conversion stalled — the source server stopped sending video.');
       }
     }, 30_000);
 
     child.stdout.on('data', (buf: Buffer) => {
-      lastProgressAt = Date.now();
       const text = buf.toString();
       const m = text.match(/out_time_ms=(\d+)/g);
-      if (m && spec.durationSec && spec.durationSec > 0) {
-        const last = m[m.length - 1];
-        const us = parseInt(last.split('=')[1], 10);
-        const pct = Math.min(99, (us / 1_000_000 / spec.durationSec) * 100);
-        this.db.updateTranscodeJobProgress(spec.id, pct);
+      if (m) {
+        const us = parseInt(m[m.length - 1].split('=')[1], 10);
+        if (us > lastOutTime) {
+          lastOutTime = us;
+          lastAdvanceAt = Date.now(); // only real advancement resets the watchdog
+          if (spec.durationSec && spec.durationSec > 0) {
+            const pct = Math.min(99, (us / 1_000_000 / spec.durationSec) * 100);
+            this.db.updateTranscodeJobProgress(spec.id, pct);
+          }
+        }
       }
     });
     child.stderr.on('data', (buf: Buffer) => {
