@@ -20,6 +20,14 @@ export interface PlexLibrary {
   type: string;
 }
 
+export interface PlexCollection {
+  ratingKey: string;
+  title: string;
+  thumb?: string;
+  childCount?: number;
+  subtype?: string; // 'movie' | 'show' etc. — what the collection holds
+}
+
 export interface PlexMedia {
   ratingKey: string;
   key: string;
@@ -587,6 +595,52 @@ export class PlexService {
     } catch (error) {
       logger.error('Failed to get tracks', { error });
       throw new Error('Failed to get tracks');
+    }
+  }
+
+  // Plex collections within a library (e.g. "Marvel Cinematic Universe").
+  // Directory entries, not Metadata.
+  async getCollections(libraryKey: string, userToken?: string): Promise<PlexCollection[]> {
+    if (!this.plexUrl) {
+      throw new Error('Plex server not configured');
+    }
+
+    try {
+      const response = await axios.get(`${this.plexUrl}/library/sections/${libraryKey}/collections`, this.getAxiosConfig({
+        'X-Plex-Token': userToken || '',
+        'Accept': 'application/json',
+      }));
+
+      const dirs = response.data?.MediaContainer?.Metadata || response.data?.MediaContainer?.Directory || [];
+      return dirs.map((d: any) => ({
+        ratingKey: d.ratingKey,
+        title: d.title,
+        thumb: d.thumb,
+        childCount: d.childCount ? parseInt(d.childCount, 10) : undefined,
+        subtype: d.subtype,
+      }));
+    } catch (error) {
+      logger.error('Failed to get collections', { error });
+      throw new Error('Failed to get collections');
+    }
+  }
+
+  // Items inside a collection.
+  async getCollectionContent(collectionRatingKey: string, userToken?: string): Promise<PlexMedia[]> {
+    if (!this.plexUrl) {
+      throw new Error('Plex server not configured');
+    }
+
+    try {
+      const response = await axios.get(`${this.plexUrl}/library/collections/${collectionRatingKey}/children`, this.getAxiosConfig({
+        'X-Plex-Token': userToken || '',
+        'Accept': 'application/json',
+      }));
+
+      return response.data?.MediaContainer?.Metadata || [];
+    } catch (error) {
+      logger.error('Failed to get collection content', { error });
+      throw new Error('Failed to get collection content');
     }
   }
 

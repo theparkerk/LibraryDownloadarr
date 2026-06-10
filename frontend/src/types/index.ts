@@ -23,6 +23,14 @@ export interface ServerInfo {
   isHome: boolean;
 }
 
+export interface Collection {
+  ratingKey: string;
+  title: string;
+  thumb?: string;
+  childCount?: number;
+  subtype?: string;
+}
+
 export interface MediaItem {
   ratingKey: string;
   key: string;

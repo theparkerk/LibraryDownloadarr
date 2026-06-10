@@ -47,6 +47,50 @@ export const createLibrariesRouter = (db: DatabaseService) => {
     }
   });
 
+  // Get collections in a library
+  router.get('/:libraryKey/collections', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { libraryKey } = req.params;
+      const { token, serverUrl, error } = await resolveServerContext(req);
+
+      if (error) {
+        return res.status(403).json({ error });
+      }
+      if (!token || !serverUrl) {
+        return res.status(500).json({ error: 'Plex server not configured' });
+      }
+
+      const plex = createPlexClient(serverUrl);
+      const collections = await plex.getCollections(libraryKey, token);
+      return res.json({ collections });
+    } catch (error) {
+      logger.error('Failed to get collections', { error });
+      return res.status(500).json({ error: 'Failed to get collections' });
+    }
+  });
+
+  // Get items inside a collection
+  router.get('/collections/:collectionRatingKey/content', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { collectionRatingKey } = req.params;
+      const { token, serverUrl, error } = await resolveServerContext(req);
+
+      if (error) {
+        return res.status(403).json({ error });
+      }
+      if (!token || !serverUrl) {
+        return res.status(500).json({ error: 'Plex server not configured' });
+      }
+
+      const plex = createPlexClient(serverUrl);
+      const content = await plex.getCollectionContent(collectionRatingKey, token);
+      return res.json({ content });
+    } catch (error) {
+      logger.error('Failed to get collection content', { error });
+      return res.status(500).json({ error: 'Failed to get collection content' });
+    }
+  });
+
   // Get library content
   router.get('/:libraryKey/content', authMiddleware, async (req: AuthRequest, res) => {
     try {

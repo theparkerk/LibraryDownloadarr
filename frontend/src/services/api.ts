@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import {
   User,
   AuthResponse,
+  Collection,
   Library,
   MediaItem,
   PlexPin,
@@ -128,6 +129,20 @@ class ApiClient {
       {
         params: viewType ? { viewType } : undefined,
       }
+    );
+    return response.data.content;
+  }
+
+  async getCollections(libraryKey: string): Promise<Collection[]> {
+    const response = await this.client.get<{ collections: Collection[] }>(
+      `/libraries/${libraryKey}/collections`
+    );
+    return response.data.collections;
+  }
+
+  async getCollectionContent(collectionRatingKey: string): Promise<MediaItem[]> {
+    const response = await this.client.get<{ content: MediaItem[] }>(
+      `/libraries/collections/${collectionRatingKey}/content`
     );
     return response.data.content;
   }
