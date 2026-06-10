@@ -41,10 +41,18 @@ export const MediaGrid: React.FC<MediaGridProps> = ({ media, isLoading }) => {
     <div className={LAYOUT_CLASSES[viewMode]}>
       {media.map((item) => (
         <MediaCard
-          key={item.ratingKey}
+          key={`${item._preferredServerId || ''}:${item.ratingKey}`}
           media={item}
           mode={viewMode}
-          onClick={() => navigate(`/media/${item.ratingKey}`)}
+          onClick={() =>
+            // Carry cross-server availability so MediaDetail can offer a
+            // source picker without re-deriving it
+            navigate(`/media/${item.ratingKey}`, {
+              state: item.availability
+                ? { availability: item.availability, preferredServerId: item._preferredServerId }
+                : undefined,
+            })
+          }
         />
       ))}
     </div>

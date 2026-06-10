@@ -39,12 +39,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       const data = await api.getServers();
       setServers(data);
       // A stale selection (e.g. a server no longer shared with this
-      // account) would 403 every request — snap back to home
+      // account) would 403 every request — snap back to home. 'all' stays
+      // valid whenever there's more than one server.
       const selected = getSelectedServerId();
       if (
         selected !== 'home' &&
+        selected !== 'all' &&
         !data.some((s) => s.machineId === selected)
       ) {
+        selectServer('home');
+      } else if (selected === 'all' && data.length <= 1) {
         selectServer('home');
       }
     } catch (error) {
@@ -52,9 +56,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  const serverValue = servers.some((s) => s.machineId === selectedServerId && !s.isHome)
-    ? selectedServerId
-    : 'home';
+  const serverValue =
+    selectedServerId === 'all' && servers.length > 1
+      ? 'all'
+      : servers.some((s) => s.machineId === selectedServerId && !s.isHome)
+      ? selectedServerId
+      : 'home';
 
   const isActive = (path: string) => location.pathname === path;
 
@@ -96,11 +103,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
               </label>
               <select
                 value={serverValue}
-                onChange={(e) =>
-                  selectServer(e.target.value === 'home' ? 'home' : e.target.value)
-                }
+                onChange={(e) => selectServer(e.target.value)}
                 className="w-full bg-dark-200 border border-dark-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary-500"
               >
+                <option value="all">🌐 All Servers</option>
                 {servers.map((server) => (
                   <option
                     key={server.machineId}

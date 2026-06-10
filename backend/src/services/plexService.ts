@@ -33,6 +33,9 @@ export interface PlexMedia {
   key: string;
   title: string;
   type: string;
+  // Plex global identifier, e.g. "plex://movie/636ff7029cfc5f11985d7e6c".
+  // Identical across servers for the same title — the cross-server dedup key.
+  guid?: string;
   year?: number;
   thumb?: string;
   art?: string;

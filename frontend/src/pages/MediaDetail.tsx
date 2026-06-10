@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useLocation } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
-import { api } from '../services/api';
-import { MediaItem } from '../types';
+import { api, getSelectedServerId } from '../services/api';
+import { MediaItem, SourceRef } from '../types';
 import { useDownloads } from '../contexts/DownloadContext';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
+  const location = useLocation();
+  const navState = location.state as
+    | { availability?: SourceRef[]; preferredServerId?: string }
+    | null;
   const { startDownload, downloads } = useDownloads();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
   const [media, setMedia] = useState<MediaItem | null>(null);
@@ -19,38 +23,67 @@ export const MediaDetail: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // The source server for this detail page. From nav state in All-Servers
+  // mode; on a refresh/deep-link with the dropdown still on 'all' there's no
+  // nav state, so fall back to 'home' (a concrete, always-resolvable server)
+  // rather than sending 'all' to a server-scoped endpoint.
+  const initialSource = (): string | undefined =>
+    navState?.preferredServerId ?? (getSelectedServerId() === 'all' ? 'home' : undefined);
+
+  // Cross-server source selection (All-Servers mode). availability comes from
+  // the navigation state; in single-server mode it stays empty and every
+  // call uses the dropdown server.
+  const [availability] = useState<SourceRef[]>(navState?.availability || []);
+  const [srcServerId, setSrcServerId] = useState<string | undefined>(initialSource());
+  // The active title's ratingKey on the active source server. Switching
+  // source swaps to that server's ratingKey for the same title.
+  const [activeRatingKey, setActiveRatingKey] = useState<string | undefined>(ratingKey);
+
+  // New navigation (different media): reset to that route's source
   useEffect(() => {
-    if (ratingKey) {
-      loadMediaDetails();
-    }
+    setSrcServerId(initialSource());
+    setActiveRatingKey(ratingKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ratingKey]);
 
+  // (Re)load whenever the active title or source server changes
+  useEffect(() => {
+    if (activeRatingKey) {
+      loadMediaDetails();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRatingKey, srcServerId]);
+
   const loadMediaDetails = async () => {
-    if (!ratingKey) return;
+    if (!activeRatingKey) return;
 
     setIsLoading(true);
     setError('');
+    setSeasons([]);
+    setEpisodesBySeason({});
+    setExpandedSeasons({});
+    setTracks([]);
 
     try {
-      const metadata = await api.getMediaMetadata(ratingKey);
+      const metadata = await api.getMediaMetadata(activeRatingKey, srcServerId);
       setMedia(metadata);
 
       // If it's a TV show, load seasons
       if (metadata.type === 'show') {
-        const seasonsData = await api.getSeasons(ratingKey);
+        const seasonsData = await api.getSeasons(activeRatingKey, srcServerId);
         setSeasons(seasonsData);
       }
 
       // If it's a season (clicked directly from recently added), load episodes
       if (metadata.type === 'season') {
-        const episodesData = await api.getEpisodes(ratingKey);
-        setEpisodesBySeason({ [ratingKey]: episodesData });
-        setExpandedSeasons({ [ratingKey]: true }); // Auto-expand the season
+        const episodesData = await api.getEpisodes(activeRatingKey, srcServerId);
+        setEpisodesBySeason({ [activeRatingKey]: episodesData });
+        setExpandedSeasons({ [activeRatingKey]: true }); // Auto-expand the season
       }
 
       // If it's an album (audiobook), load tracks
       if (metadata.type === 'album') {
-        const tracksData = await api.getTracks(ratingKey);
+        const tracksData = await api.getTracks(activeRatingKey, srcServerId);
         setTracks(tracksData);
       }
     } catch (err: any) {
@@ -58,6 +91,14 @@ export const MediaDetail: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Switch to another server that has this title. Each source carries its
+  // own ratingKey, so we reload against it.
+  const switchSource = (ref: SourceRef) => {
+    if (ref.serverId === srcServerId) return;
+    setSrcServerId(ref.serverId);
+    setActiveRatingKey(ref.ratingKey);
   };
 
   const toggleSeason = async (seasonRatingKey: string) => {
@@ -69,7 +110,7 @@ export const MediaDetail: React.FC = () => {
     // Load episodes if not already loaded
     if (!episodesBySeason[seasonRatingKey]) {
       try {
-        const episodes = await api.getEpisodes(seasonRatingKey);
+        const episodes = await api.getEpisodes(seasonRatingKey, srcServerId);
         setEpisodesBySeason((prev) => ({
           ...prev,
           [seasonRatingKey]: episodes,
@@ -103,13 +144,13 @@ export const MediaDetail: React.FC = () => {
     }
 
     // Use the global download context with the specific item's rating key
-    await startDownload({ type: 'file', ratingKey: itemRatingKey, partKey }, filename, itemTitle);
+    await startDownload({ type: 'file', ratingKey: itemRatingKey, partKey, serverId: srcServerId }, filename, itemTitle);
   };
 
   const handleSeasonDownload = async (seasonRatingKey: string, seasonTitle: string) => {
     try {
       // Get size info first
-      const sizeInfo = await api.getSeasonSize(seasonRatingKey);
+      const sizeInfo = await api.getSeasonSize(seasonRatingKey, srcServerId);
 
       // Check if over 10GB and confirm
       const tenGB = 10737418240;
@@ -127,7 +168,7 @@ export const MediaDetail: React.FC = () => {
       const zipFilename = `${showName} - S${String(seasonNumber).padStart(2, '0')}.zip`;
 
       // Use the download context to track the season download
-      await startDownload({ type: 'season', ratingKey: seasonRatingKey }, zipFilename, `${seasonTitle} (Full Season)`);
+      await startDownload({ type: 'season', ratingKey: seasonRatingKey, serverId: srcServerId }, zipFilename, `${seasonTitle} (Full Season)`);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start season download');
     }
@@ -136,7 +177,7 @@ export const MediaDetail: React.FC = () => {
   const handleAlbumDownload = async (albumRatingKey: string, albumTitle: string) => {
     try {
       // Get size info first
-      const sizeInfo = await api.getAlbumSize(albumRatingKey);
+      const sizeInfo = await api.getAlbumSize(albumRatingKey, srcServerId);
 
       // Check if over 10GB and confirm
       const tenGB = 10737418240;
@@ -152,7 +193,7 @@ export const MediaDetail: React.FC = () => {
       const zipFilename = `${albumTitle}.zip`;
 
       // Use the download context to track the album download
-      await startDownload({ type: 'album', ratingKey: albumRatingKey }, zipFilename, `${albumTitle} (Full Album)`);
+      await startDownload({ type: 'album', ratingKey: albumRatingKey, serverId: srcServerId }, zipFilename, `${albumTitle} (Full Album)`);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start album download');
     }
@@ -203,8 +244,8 @@ export const MediaDetail: React.FC = () => {
     );
   }
 
-  const posterUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb) : null;
-  const backdropUrl = media.art ? api.getThumbnailUrl(media.ratingKey, media.art) : null;
+  const posterUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb, srcServerId) : null;
+  const backdropUrl = media.art ? api.getThumbnailUrl(media.ratingKey, media.art, srcServerId) : null;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -264,18 +305,41 @@ export const MediaDetail: React.FC = () => {
                     </div>
                   )}
 
+                  {/* Source picker — only when this title is on >1 server */}
+                  {availability.length > 1 && (
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <span className="text-sm text-gray-400">Download from:</span>
+                      <select
+                        value={srcServerId || ''}
+                        onChange={(e) => {
+                          const ref = availability.find((a) => a.serverId === e.target.value);
+                          if (ref) switchSource(ref);
+                        }}
+                        className="bg-dark-100 border border-dark-50 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-primary-500"
+                      >
+                        {availability.map((a) => (
+                          <option key={a.serverId} value={a.serverId}>
+                            {a.serverName}
+                            {a.isHome ? ' (home)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="text-xs text-gray-500">available on {availability.length} servers</span>
+                    </div>
+                  )}
+
                   {/* Download Options */}
                   <div className="mt-4 md:mt-8">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="text-xl md:text-2xl font-semibold">Download</h2>
                       {media.type === 'album' && tracks.length > 0 && (
                         <button
-                          onClick={() => handleAlbumDownload(ratingKey!, media.title)}
-                          disabled={isDownloading(ratingKey!)}
+                          onClick={() => handleAlbumDownload(media.ratingKey, media.title)}
+                          disabled={isDownloading(media.ratingKey)}
                           className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                           title="Download entire album as ZIP"
                         >
-                          {isDownloading(ratingKey!)
+                          {isDownloading(media.ratingKey)
                             ? '⏳ Starting...'
                             : '📦 Download Album'}
                         </button>
@@ -344,7 +408,7 @@ export const MediaDetail: React.FC = () => {
                               <div className="flex items-center space-x-3">
                                 {episode.thumb && (
                                   <img
-                                    src={api.getThumbnailUrl(episode.ratingKey, episode.thumb)}
+                                    src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId)}
                                     alt={episode.title}
                                     className="w-20 h-12 md:w-24 md:h-16 object-cover rounded"
                                   />
@@ -399,7 +463,7 @@ export const MediaDetail: React.FC = () => {
                                 >
                                   {season.thumb && (
                                     <img
-                                      src={api.getThumbnailUrl(season.ratingKey, season.thumb)}
+                                      src={api.getThumbnailUrl(season.ratingKey, season.thumb, srcServerId)}
                                       alt={season.title}
                                       className="w-12 h-18 md:w-16 md:h-24 object-cover rounded"
                                     />
@@ -442,7 +506,7 @@ export const MediaDetail: React.FC = () => {
                                         <div className="flex items-center space-x-3">
                                           {episode.thumb && (
                                             <img
-                                              src={api.getThumbnailUrl(episode.ratingKey, episode.thumb)}
+                                              src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId)}
                                               alt={episode.title}
                                               className="w-20 h-12 md:w-24 md:h-16 object-cover rounded"
                                             />
@@ -514,7 +578,7 @@ export const MediaDetail: React.FC = () => {
                                     <button
                                       onClick={() =>
                                         handleDownload(
-                                          ratingKey!,
+                                          media.ratingKey,
                                           part.key,
                                           part.file.split('/').pop() || 'download',
                                           media.title,

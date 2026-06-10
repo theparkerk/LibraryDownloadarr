@@ -41,8 +41,12 @@ class ApiClient {
       if (token) {
         config.headers.Authorization = `Bearer ${token}`;
       }
+      // Default to the dropdown's selected server, but never clobber a
+      // serverId a specific call already set (e.g. a download targeting a
+      // concrete source while the dropdown is on 'all')
+      const alreadyScoped = config.params && config.params.serverId != null;
       const serverId = getSelectedServerId();
-      if (serverId && serverId !== 'home') {
+      if (!alreadyScoped && serverId && serverId !== 'home') {
         config.params = { ...(config.params || {}), serverId };
       }
       return config;
@@ -162,23 +166,34 @@ class ApiClient {
     return response.data.results;
   }
 
-  async getMediaMetadata(ratingKey: string): Promise<MediaItem> {
-    const response = await this.client.get<{ metadata: MediaItem }>(`/media/${ratingKey}`);
+  // serverId pins a request to a concrete server even while the dropdown is
+  // on 'all' (used after drilling into a merged item). undefined = let the
+  // interceptor apply the dropdown selection.
+  async getMediaMetadata(ratingKey: string, serverId?: string): Promise<MediaItem> {
+    const response = await this.client.get<{ metadata: MediaItem }>(`/media/${ratingKey}`, {
+      params: serverId ? { serverId } : undefined,
+    });
     return response.data.metadata;
   }
 
-  async getSeasons(showRatingKey: string): Promise<MediaItem[]> {
-    const response = await this.client.get<{ seasons: MediaItem[] }>(`/media/${showRatingKey}/seasons`);
+  async getSeasons(showRatingKey: string, serverId?: string): Promise<MediaItem[]> {
+    const response = await this.client.get<{ seasons: MediaItem[] }>(`/media/${showRatingKey}/seasons`, {
+      params: serverId ? { serverId } : undefined,
+    });
     return response.data.seasons;
   }
 
-  async getEpisodes(seasonRatingKey: string): Promise<MediaItem[]> {
-    const response = await this.client.get<{ episodes: MediaItem[] }>(`/media/${seasonRatingKey}/episodes`);
+  async getEpisodes(seasonRatingKey: string, serverId?: string): Promise<MediaItem[]> {
+    const response = await this.client.get<{ episodes: MediaItem[] }>(`/media/${seasonRatingKey}/episodes`, {
+      params: serverId ? { serverId } : undefined,
+    });
     return response.data.episodes;
   }
 
-  async getTracks(albumRatingKey: string): Promise<MediaItem[]> {
-    const response = await this.client.get<{ tracks: MediaItem[] }>(`/media/${albumRatingKey}/tracks`);
+  async getTracks(albumRatingKey: string, serverId?: string): Promise<MediaItem[]> {
+    const response = await this.client.get<{ tracks: MediaItem[] }>(`/media/${albumRatingKey}/tracks`, {
+      params: serverId ? { serverId } : undefined,
+    });
     return response.data.tracks;
   }
 
@@ -207,33 +222,53 @@ class ApiClient {
   async createDownloadToken(
     scopeType: 'file' | 'season' | 'album',
     ratingKey: string,
-    partKey?: string
+    partKey?: string,
+    serverId?: string
   ): Promise<{ url: string; expiresAt: number }> {
+    // serverId goes in the query, not the body: the request interceptor
+    // treats an explicit params.serverId as authoritative and won't overlay
+    // the dropdown's selection (which is 'all' here). Backend reads query
+    // first, so this pins the token to the chosen source server.
     const response = await this.client.post<{ url: string; expiresAt: number }>(
       '/media/download-token',
-      { scopeType, ratingKey, partKey }
+      { scopeType, ratingKey, partKey },
+      { params: serverId ? { serverId } : undefined }
     );
     return response.data;
   }
 
-  async getSeasonSize(seasonRatingKey: string): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
+  async getSeasonSize(
+    seasonRatingKey: string,
+    serverId?: string
+  ): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
     const response = await this.client.get<{ totalSize: number; fileCount: number; totalSizeGB: string }>(
-      `/media/season/${seasonRatingKey}/size`
+      `/media/season/${seasonRatingKey}/size`,
+      { params: serverId ? { serverId } : undefined }
     );
     return response.data;
   }
 
-  async getAlbumSize(albumRatingKey: string): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
+  async getAlbumSize(
+    albumRatingKey: string,
+    serverId?: string
+  ): Promise<{ totalSize: number; fileCount: number; totalSizeGB: string }> {
     const response = await this.client.get<{ totalSize: number; fileCount: number; totalSizeGB: string }>(
-      `/media/album/${albumRatingKey}/size`
+      `/media/album/${albumRatingKey}/size`,
+      { params: serverId ? { serverId } : undefined }
     );
     return response.data;
   }
 
-  getThumbnailUrl(ratingKey: string, path: string): string {
+  // serverId override is required for merged ('all'-mode) items, whose thumb
+  // lives on the preferred source server, not the 'all' selection.
+  getThumbnailUrl(ratingKey: string, path: string, serverId?: string): string {
     const token = localStorage.getItem('token');
-    const serverId = getSelectedServerId();
-    const serverParam = serverId && serverId !== 'home' ? `&serverId=${encodeURIComponent(serverId)}` : '';
+    const effective = serverId ?? getSelectedServerId();
+    // 'all' is not a real server — a thumb must come from a concrete one
+    const serverParam =
+      effective && effective !== 'home' && effective !== 'all'
+        ? `&serverId=${encodeURIComponent(effective)}`
+        : '';
     return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}${serverParam}`;
   }
 

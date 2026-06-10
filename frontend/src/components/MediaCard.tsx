@@ -10,7 +10,12 @@ interface MediaCardProps {
 }
 
 export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'grid' }) => {
-  const thumbnailUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb) : null;
+  // In All-Servers mode the thumb belongs to the preferred source server
+  const thumbnailUrl = media.thumb
+    ? api.getThumbnailUrl(media.ratingKey, media.thumb, media._preferredServerId)
+    : null;
+  const serverCount = media.availability?.length ?? 0;
+  const multiServer = serverCount > 1;
 
   // Format display info based on media type
   const getDisplayInfo = () => {
@@ -76,6 +81,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'gr
             {meta && <span>{meta}</span>}
             {media.contentRating && <span>· {media.contentRating}</span>}
             <span className="capitalize">· {media.type}</span>
+            {multiServer && <span className="text-primary-400">· on {serverCount} servers</span>}
           </div>
         </div>
       </div>
@@ -103,6 +109,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'gr
           <div className="w-full h-full flex items-center justify-center text-gray-600">
             <span className="text-4xl">{fallbackIcon}</span>
           </div>
+        )}
+
+        {multiServer && (
+          <span className="absolute top-2 left-2 bg-primary-500/90 text-white text-xs rounded px-1.5 py-0.5 z-10">
+            {serverCount} servers
+          </span>
         )}
 
         {/* Overlay on hover */}

@@ -31,11 +31,22 @@ export interface Collection {
   subtype?: string;
 }
 
+// One server that has a given title, in All-Servers mode
+export interface SourceRef {
+  serverId: string;
+  serverName: string;
+  ratingKey: string;
+  isHome: boolean;
+  owned: boolean;
+  allowSync?: boolean | number | string;
+}
+
 export interface MediaItem {
   ratingKey: string;
   key: string;
   title: string;
   type: string;
+  guid?: string;
   year?: number;
   thumb?: string;
   art?: string;
@@ -53,6 +64,11 @@ export interface MediaItem {
   index?: number; // Episode number or Track number
   parentIndex?: number; // Season number
   Media?: MediaPart[];
+  // All-Servers mode only: which servers have this title + the preferred
+  // download source (the ratingKey/thumb above resolve against it)
+  availability?: SourceRef[];
+  _preferredServerId?: string;
+  _fuzzyMatched?: boolean;
 }
 
 export interface MediaPart {

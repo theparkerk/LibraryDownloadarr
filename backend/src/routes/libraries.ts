@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { DatabaseService } from '../models/database';
 import { createPlexClient } from '../services/plexService';
 import { resolveServer } from '../services/serverRegistry';
+import { listAllServersLibraries, getAllServersLibraryContent } from '../services/crossServerService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 
@@ -9,16 +10,24 @@ export const createLibrariesRouter = (db: DatabaseService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
 
+  const requestedServerId = (req: AuthRequest): string | undefined =>
+    typeof req.query.serverId === 'string' ? req.query.serverId : undefined;
+
   // Resolves which server this request targets (home by default; any other
   // serverId must be in the user's own plex.tv resource list)
   const resolveServerContext = (req: AuthRequest) => {
-    const requested = typeof req.query.serverId === 'string' ? req.query.serverId : undefined;
-    return resolveServer(db, req.user, requested);
+    return resolveServer(db, req.user, requestedServerId(req));
   };
 
   // Get all libraries
   router.get('/', authMiddleware, async (req: AuthRequest, res) => {
     try {
+      // All-Servers mode: synthetic libraries collapsed by type
+      if (requestedServerId(req) === 'all') {
+        const libraries = await listAllServersLibraries(db, req.user);
+        return res.json({ libraries });
+      }
+
       const { token, serverUrl, error } = await resolveServerContext(req);
 
       if (error) {
@@ -51,6 +60,10 @@ export const createLibrariesRouter = (db: DatabaseService) => {
   router.get('/:libraryKey/collections', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const { libraryKey } = req.params;
+      // Collections are per-server; not meaningful in All-Servers mode
+      if (requestedServerId(req) === 'all') {
+        return res.json({ collections: [] });
+      }
       const { token, serverUrl, error } = await resolveServerContext(req);
 
       if (error) {
@@ -96,6 +109,12 @@ export const createLibrariesRouter = (db: DatabaseService) => {
     try {
       const { libraryKey } = req.params;
       const { viewType } = req.query;
+
+      // All-Servers mode: libraryKey is a synthetic 'type:movie' key
+      if (requestedServerId(req) === 'all') {
+        const { items, failures } = await getAllServersLibraryContent(db, req.user, libraryKey);
+        return res.json({ content: items, failures });
+      }
 
       const { token, serverUrl, error } = await resolveServerContext(req);
 

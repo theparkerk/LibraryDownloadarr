@@ -3,10 +3,12 @@ import { api } from '../services/api';
 
 // What to download. File downloads need the specific part; season/album
 // downloads are zipped server-side.
+// serverId pins the download to a chosen server (All-Servers mode source
+// picker). Omitted = the home/selected server, as before.
 export type DownloadScope =
-  | { type: 'file'; ratingKey: string; partKey: string }
-  | { type: 'season'; ratingKey: string }
-  | { type: 'album'; ratingKey: string };
+  | { type: 'file'; ratingKey: string; partKey: string; serverId?: string }
+  | { type: 'season'; ratingKey: string; serverId?: string }
+  | { type: 'album'; ratingKey: string; serverId?: string };
 
 interface Download {
   id: string;
@@ -70,7 +72,8 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
       const { url } = await api.createDownloadToken(
         scope.type,
         scope.ratingKey,
-        scope.type === 'file' ? scope.partKey : undefined
+        scope.type === 'file' ? scope.partKey : undefined,
+        scope.serverId
       );
 
       // Same-origin navigation is never popup-blocked (unlike programmatic

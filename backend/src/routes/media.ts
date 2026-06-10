@@ -1,7 +1,8 @@
 import { Router, Response, NextFunction } from 'express';
 import { DatabaseService, DownloadScopeType } from '../models/database';
 import { createPlexClient } from '../services/plexService';
-import { resolveServer } from '../services/serverRegistry';
+import { resolveServer, ServerContext } from '../services/serverRegistry';
+import { searchAllServers, getRecentlyAddedAllServers } from '../services/crossServerService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware, resolveUserById } from '../middleware/auth';
 import axios from 'axios';
@@ -90,16 +91,28 @@ export const createMediaRouter = (db: DatabaseService) => {
     return `${library} - ${metadata.title || 'Unknown Media'}`;
   };
 
+  const requestedServerId = (req: AuthRequest): string | undefined =>
+    req.downloadServerId ??
+    (typeof req.query.serverId === 'string' ? req.query.serverId : undefined) ??
+    (typeof req.body?.serverId === 'string' ? req.body.serverId : undefined);
+
   // Resolves which server this request targets and the credentials for it.
   // No serverId (or the home machine id) keeps the original single-server
   // semantics: admin's configured URL, user's own token. Any other serverId
   // must appear in plex.tv's resource list for the requesting user's
-  // account — never an arbitrary URL.
-  const resolveServerContext = (req: AuthRequest) => {
-    const requested =
-      req.downloadServerId ??
-      (typeof req.query.serverId === 'string' ? req.query.serverId : undefined) ??
-      (typeof req.body?.serverId === 'string' ? req.body.serverId : undefined);
+  // account — never an arbitrary URL. The synthetic 'all' selection has no
+  // single server, so server-scoped endpoints reject it here (search and
+  // recently-added handle 'all' before calling this).
+  const resolveServerContext = (req: AuthRequest): Promise<ServerContext> => {
+    const requested = requestedServerId(req);
+    if (requested === 'all') {
+      return Promise.resolve({
+        serverUrl: '',
+        serverName: '',
+        isHome: false,
+        error: 'Pick a specific server for this action.',
+      });
+    }
     return resolveServer(db, req.user, requested);
   };
 
@@ -107,6 +120,13 @@ export const createMediaRouter = (db: DatabaseService) => {
   router.get('/recently-added', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
+
+      // All-Servers mode: merged across every reachable server
+      if (requestedServerId(req) === 'all') {
+        const { items, failures } = await getRecentlyAddedAllServers(db, req.user, limit);
+        return res.json({ media: items, failures });
+      }
+
       const { token, serverUrl, error } = await resolveServerContext(req);
 
       if (error) {
@@ -231,6 +251,17 @@ export const createMediaRouter = (db: DatabaseService) => {
 
       if (q.trim().length < 2) {
         return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+      }
+
+      // All-Servers mode: merged + deduped across every reachable server,
+      // then relevance-scored
+      if (requestedServerId(req) === 'all') {
+        const { items, failures } = await searchAllServers(db, req.user, q);
+        const scored = items
+          .map((item) => ({ ...item, _relevanceScore: calculateRelevanceScore(item, q) }))
+          .sort((a, b) => b._relevanceScore - a._relevanceScore)
+          .map(({ _relevanceScore, ...item }) => item);
+        return res.json({ results: scored, failures });
       }
 
       const { token, serverUrl, error } = await resolveServerContext(req);
