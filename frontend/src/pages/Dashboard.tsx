@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
 import { MediaGrid } from '../components/MediaGrid';
+import { MediaControls } from '../components/MediaControls';
 import { api } from '../services/api';
 import { Library, MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
+import { useMediaView } from '../hooks/useMediaView';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
@@ -16,6 +18,7 @@ export const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const { user } = useAuthStore();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
+  const view = useMediaView(recentlyAdded);
 
   useEffect(() => {
     // Wait for user to be loaded
@@ -105,8 +108,11 @@ export const Dashboard: React.FC = () => {
               <div className="text-center text-gray-400 py-12">Loading...</div>
             ) : recentlyAdded.length > 0 ? (
               <div>
-                <h3 className="text-xl md:text-2xl font-bold mb-3 md:mb-4">Recently Added</h3>
-                <MediaGrid media={recentlyAdded} />
+                <div className="flex flex-wrap items-center justify-between gap-4 mb-3 md:mb-4">
+                  <h3 className="text-xl md:text-2xl font-bold">Recently Added</h3>
+                  <MediaControls view={view} />
+                </div>
+                <MediaGrid media={view.items} />
               </div>
             ) : (
               <div className="card p-6 md:p-8 text-center">
