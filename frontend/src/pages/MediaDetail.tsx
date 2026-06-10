@@ -421,7 +421,7 @@ export const MediaDetail: React.FC = () => {
                               key={track.ratingKey}
                               className="card p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-2 md:gap-0"
                             >
-                              <div className="flex items-center space-x-3">
+                              <div className="flex items-center space-x-3 min-w-0 flex-1">
                                 <div className="text-gray-400 font-mono text-sm w-6 md:w-8">
                                   {index + 1}.
                                 </div>
@@ -471,7 +471,7 @@ export const MediaDetail: React.FC = () => {
                               key={episode.ratingKey}
                               className="card p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-2 md:gap-0"
                             >
-                              <div className="flex items-center space-x-3">
+                              <div className="flex items-center space-x-3 min-w-0 flex-1">
                                 {episode.thumb && (
                                   <img
                                     src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId)}
@@ -530,19 +530,19 @@ export const MediaDetail: React.FC = () => {
                                       className="w-12 h-18 md:w-16 md:h-24 object-cover rounded"
                                     />
                                   )}
-                                  <div className="text-left flex-1">
-                                    <div className="font-medium text-base md:text-lg">{season.title}</div>
+                                  <div className="text-left flex-1 min-w-0">
+                                    <div className="font-medium text-base md:text-lg truncate">{season.title}</div>
                                     {season.summary && (
                                       <div className="text-xs md:text-sm text-gray-400 line-clamp-2">
                                         {season.summary}
                                       </div>
                                     )}
                                   </div>
-                                  <span className="text-gray-400">
+                                  <span className="text-gray-400 flex-shrink-0">
                                     {expandedSeasons[season.ratingKey] ? '▼' : '▶'}
                                   </span>
                                 </button>
-                                <div className="ml-2" onClick={(e) => e.stopPropagation()}>
+                                <div className="ml-2 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <QualityMenu
                                     busy={isDownloading(season.ratingKey)}
                                     onSelect={(q) =>
@@ -562,7 +562,7 @@ export const MediaDetail: React.FC = () => {
                                         key={episode.ratingKey}
                                         className="card p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-2 md:gap-0"
                                       >
-                                        <div className="flex items-center space-x-3">
+                                        <div className="flex items-center space-x-3 min-w-0 flex-1">
                                           {episode.thumb && (
                                             <img
                                               src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId)}
