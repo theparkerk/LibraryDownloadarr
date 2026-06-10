@@ -794,14 +794,58 @@ a launchd helper on the M4 (`host-tools/transcode-helper.mjs`) runs
 
 **The helper must be running for conversions to complete** — all
 conversions (home + remote) download the original then encode on the host
-via the helper. One-time install on the M4:
+via the helper.
+
+### CRITICAL: Full Disk Access (the external-volume TCC gate)
+
+The cache lives on `/Volumes/Media` — a **USB external** APFS volume. macOS
+TCC blocks a **launchd agent** from touching an external volume unless its
+executable has **Full Disk Access**. Worse, the denial isn't an error — the
+`readdirSync` call **hangs forever**, so the helper logs its startup line and
+then silently does nothing (no jobs claimed, every conversion fails "host
+encode stalled"). Foreground/`ssh` runs work because Remote Login (`sshd`)
+already has Full Disk Access, which child processes inherit — so the bug only
+shows up under launchd. This is why the helper appeared to "run" for days
+without ever encoding anything.
+
+The fix: run the helper under a dedicated, code-signed **copy of bun** (a
+single self-contained binary; a copy of `node` won't run — it dynlinks
+`libnode.*.dylib` from its Cellar dir) and grant **that copy** Full Disk
+Access. Using a stable copy means `brew upgrade bun` doesn't invalidate the
+grant.
+
+One-time install on the M4:
 
 ```bash
+# 1. Stable, signed bun copy the launchd agent runs (survives brew upgrades):
+mkdir -p ~/.local/bin
+cp -f "$(command -v bun)" ~/.local/bin/lda-bun
+codesign --force --sign - --identifier com.parker.lda-bun ~/.local/bin/lda-bun
+
+# 2. Install + start the agent:
 cp host-tools/com.parker.lda-transcode-helper.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.parker.lda-transcode-helper.plist
+
+# 3. GUI, ONE TIME — grant Full Disk Access to the bun copy:
+#    System Settings → Privacy & Security → Full Disk Access → "+" →
+#    Cmd-Shift-G → /Users/parkerkelley/.local/bin/lda-bun → Add → toggle ON
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
+# 4. After granting, restart the agent so it picks up the new TCC grant:
 launchctl kickstart -k gui/$(id -u)/com.parker.lda-transcode-helper
 ```
 
+Verify it can actually reach the drive (must print a `done.json`, not hang):
+
+```bash
+printf '%s' '{"src":"/nope.mkv","out":"/Volumes/Media/lda-transcode-cache/jobs/p.mp4","bitrateK":800,"height":480,"subIndex":null,"audioBitrateK":128}' \
+  > /Volumes/Media/lda-transcode-cache/jobs/probe.job.json
+sleep 4; cat /Volumes/Media/lda-transcode-cache/jobs/probe.done.json   # {"ok":false,...} = working
+rm -f /Volumes/Media/lda-transcode-cache/jobs/probe.*
+```
+
 Logs: `~/Library/Logs/lda-transcode-helper.log`. KeepAlive restarts it if it
-dies. If the helper is down, remote conversions fail via the stall watchdog
+dies — but note KeepAlive does **not** help the TCC hang (the process never
+exits, it just blocks), so a missing FDA grant looks like a wedged helper.
+If the helper is down/blocked, conversions fail via the stall watchdog
 (~5 min) and can be retried.

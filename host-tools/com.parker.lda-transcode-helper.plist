@@ -6,8 +6,12 @@
     <string>com.parker.lda-transcode-helper</string>
     <key>ProgramArguments</key>
     <array>
-        <!-- Adjust the node path / repo path if they differ on the host -->
-        <string>/opt/homebrew/bin/node</string>
+        <!-- A dedicated, code-signed *copy* of bun (a single self-contained
+             binary — unlike Homebrew's node, which dynamically links libnode).
+             We run the copy, not /opt/homebrew/bin/bun, so the macOS Full Disk
+             Access grant (required to reach the external /Volumes/Media drive
+             from a launchd agent — see CLAUDE.md) survives `brew upgrade bun`. -->
+        <string>/Users/parkerkelley/.local/bin/lda-bun</string>
         <string>/Users/parkerkelley/Apps/LifeOS/librarydownloadarr/host-tools/transcode-helper.mjs</string>
     </array>
     <key>EnvironmentVariables</key>
