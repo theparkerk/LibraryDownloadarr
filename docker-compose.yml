@@ -11,11 +11,16 @@ services:
       - LOG_LEVEL=debug
       # Database path (persisted to volume)
       - DATABASE_PATH=/app/data/librarydownloadarr.db
+      # Converted downloads + pulled originals live on the big media drive
+      # (15 TB) rather than the small internal disk.
+      - TRANSCODE_TEMP_DIR=/transcode-cache
       # Timezone configuration (set to your local timezone)
       - TZ=America/New_York
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      # M4: external 15 TB media drive for the transcode cache
+      - /Volumes/Media/lda-transcode-cache:/transcode-cache
     networks:
       - librarydownloadarr
 
