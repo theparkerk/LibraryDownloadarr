@@ -1,5 +1,5 @@
 import React from 'react';
-import { MediaView } from '../hooks/useMediaView';
+import { MediaView, MediaFilters } from '../hooks/useMediaView';
 import { SortMode } from '../stores/viewStore';
 import { ViewModeToggle } from './ViewModeToggle';
 
@@ -87,6 +87,19 @@ export const MediaControls: React.FC<MediaControlsProps> = ({ view }) => {
               {d}s
             </option>
           ))}
+        </select>
+      )}
+
+      {view.canFilterWatched && (
+        <select
+          value={filters.watched}
+          onChange={(e) => setFilters({ ...filters, watched: e.target.value as MediaFilters['watched'] })}
+          className={selectClass}
+          aria-label="Filter by watched state"
+        >
+          <option value="">Watched & unwatched</option>
+          <option value="unwatched">Unwatched</option>
+          <option value="watched">Watched</option>
         </select>
       )}
 

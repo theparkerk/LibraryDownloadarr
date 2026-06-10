@@ -6,12 +6,22 @@ export interface MediaFilters {
   type: string; // '' = all
   contentRating: string; // '' = all
   decade: string; // '' = all, else e.g. '2020'
+  watched: '' | 'watched' | 'unwatched'; // '' = all
 }
 
-const EMPTY_FILTERS: MediaFilters = { type: '', contentRating: '', decade: '' };
+const EMPTY_FILTERS: MediaFilters = { type: '', contentRating: '', decade: '', watched: '' };
 
 const decadeOf = (year?: number): string | null =>
   year ? `${Math.floor(year / 10) * 10}` : null;
+
+// Fully watched: movies/episodes by viewCount; shows by all episodes watched.
+const isWatched = (m: MediaItem): boolean => {
+  if (m.type === 'show') return (m.leafCount || 0) > 0 && (m.viewedLeafCount || 0) >= (m.leafCount || 0);
+  return (m.viewCount || 0) > 0;
+};
+// Has any watched-state info we can filter on?
+const hasWatchState = (m: MediaItem): boolean =>
+  m.viewCount != null || m.viewedLeafCount != null || m.leafCount != null;
 
 export interface MediaView {
   items: MediaItem[];
@@ -24,6 +34,7 @@ export interface MediaView {
   availableTypes: string[];
   availableRatings: string[];
   availableDecades: string[];
+  canFilterWatched: boolean;
   allowRelevance: boolean;
 }
 
@@ -57,12 +68,15 @@ export const useMediaView = (
       ),
     [source]
   );
+  const canFilterWatched = useMemo(() => source.some(hasWatchState), [source]);
 
   const items = useMemo(() => {
     let out = source.filter((m) => {
       if (filters.type && m.type !== filters.type) return false;
       if (filters.contentRating && m.contentRating !== filters.contentRating) return false;
       if (filters.decade && decadeOf(m.year) !== filters.decade) return false;
+      if (filters.watched === 'watched' && !isWatched(m)) return false;
+      if (filters.watched === 'unwatched' && isWatched(m)) return false;
       return true;
     });
 
@@ -95,6 +109,7 @@ export const useMediaView = (
     availableTypes,
     availableRatings,
     availableDecades,
+    canFilterWatched,
     allowRelevance: searchMode,
   };
 };

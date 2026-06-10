@@ -58,6 +58,10 @@ export interface MediaItem {
   originallyAvailableAt?: string;
   studio?: string;
   contentRating?: string;
+  // Watched state: movies/episodes use viewCount; shows use viewedLeafCount/leafCount
+  viewCount?: number;
+  viewedLeafCount?: number;
+  leafCount?: number;
   // Episode/Season/Track context fields
   grandparentTitle?: string; // Show name for episodes, Artist for tracks
   parentTitle?: string; // Season name for episodes, Album for tracks

@@ -23,7 +23,10 @@ export const config = {
     // (home + each remote in parallel); this bounds the total across servers.
     // Software encoding (remote local-encode) is CPU-heavy, so cap at 2.
     maxConcurrent: parseInt(process.env.TRANSCODE_MAX_CONCURRENT || '2', 10),
-    maxQueue: parseInt(process.env.TRANSCODE_MAX_QUEUE || '10', 10),
+    // Backlog cap (queued + processing). Generous so a few seasons + movies
+    // can be queued at once; jobs still drain 2-at-a-time. Note: each finished
+    // file is kept fileTtlMs (14d), so a very large batch can pressure disk.
+    maxQueue: parseInt(process.env.TRANSCODE_MAX_QUEUE || '40', 10),
     // A ready converted file is kept this long (on our server) before the
     // hourly sweep deletes it + its job row. 14 days by default.
     fileTtlMs: parseInt(process.env.TRANSCODE_FILE_TTL_MS || `${14 * 24 * 60 * 60 * 1000}`, 10),
