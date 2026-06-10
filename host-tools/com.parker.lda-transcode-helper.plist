@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.parker.lda-transcode-helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Adjust the node path / repo path if they differ on the host -->
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/parkerkelley/Apps/LifeOS/librarydownloadarr/host-tools/transcode-helper.mjs</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LDA_JOBS_DIR</key>
+        <string>/Volumes/Media/lda-transcode-cache/jobs</string>
+        <key>LDA_FFMPEG</key>
+        <string>/opt/homebrew/bin/ffmpeg</string>
+        <key>LDA_HELPER_CONCURRENCY</key>
+        <string>2</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/parkerkelley/Library/Logs/lda-transcode-helper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/parkerkelley/Library/Logs/lda-transcode-helper.err.log</string>
+</dict>
+</plist>

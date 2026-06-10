@@ -19,6 +19,10 @@ export const config = {
     tempDir:
       process.env.TRANSCODE_TEMP_DIR ||
       path.join(path.dirname(process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'x')), 'transcode-cache'),
+    // The same cache dir as the macOS host sees it — for translating paths in
+    // job files handed to the host VideoToolbox helper (which runs outside the
+    // container). Mirrors the docker-compose bind mount.
+    hostTempDir: process.env.HOST_TRANSCODE_DIR || '/Volumes/Media/lda-transcode-cache',
     // Global safety cap on simultaneous ffmpeg jobs. One job runs per server
     // (home + each remote in parallel); this bounds the total across servers.
     // Software encoding (remote local-encode) is CPU-heavy, so cap at 2.

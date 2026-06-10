@@ -40,9 +40,10 @@ const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 export class TranscodeService {
   private db: DatabaseService;
   private queue: JobSpec[] = [];
-  // Track the spec alongside the child so teardown/shutdown can stop the
-  // matching Plex session.
-  private active = new Map<string, { child: ChildProcess; spec: JobSpec }>();
+  // Track in-flight jobs. HLS/download phases have a `child` ffmpeg; the host
+  // encode phase has no local child — `cancelHost` writes the .cancel marker
+  // so the host helper aborts.
+  private active = new Map<string, { child?: ChildProcess; spec: JobSpec; cancelHost?: () => void }>();
 
   constructor(db: DatabaseService) {
     this.db = db;
@@ -260,7 +261,6 @@ export class TranscodeService {
   private async runLocalEncode(spec: JobSpec): Promise<void> {
     this.db.setTranscodeJobProcessing(spec.id, spec.durationSec);
     const src = path.join(config.transcode.tempDir, `${spec.id}.src.mkv`);
-    const out = this.partPath(spec.id);
     const final = this.outputPath(spec.id);
     const dur = spec.durationSec || 0;
     const originalUrl = `${spec.serverUrl}${spec.partKey}?download=1&X-Plex-Token=${encodeURIComponent(spec.token)}`;
@@ -281,46 +281,128 @@ export class TranscodeService {
 
       // Pick the English text subtitle stream from the downloaded original
       const subIdx = spec.subtitleStreamId ? this.findEngTextSubIndex(src) : null;
-      const subArgs =
-        subIdx != null
-          ? ['-map', '0:v:0?', '-map', '0:a:0?', '-map', `0:s:${subIdx}`, '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng']
-          : ['-map', '0:v:0?', '-map', '0:a:0?'];
-      const h = spec.preset.videoResolution.split('x')[1] || '1080';
-      const vbr = spec.preset.maxVideoBitrate;
 
-      // Phase 2: software-encode local original (encode progress maps to 15–100%)
-      await this.runChild(
-        spec,
-        [
-          '-nostdin', '-loglevel', 'error', '-progress', 'pipe:1',
-          '-i', src,
-          ...subArgs,
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
-          '-maxrate', `${vbr}k`, '-bufsize', `${vbr * 2}k`,
-          '-vf', `scale=-2:min(ih\\,${h})`, // cap height, never upscale
-          '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
-          '-movflags', '+faststart', '-f', 'mp4', '-y', out,
-        ],
-        (us) => 15 + (dur > 0 ? Math.min(84, (us / 1e6 / dur) * 85) : 0)
-      );
+      // Phase 2: hand the heavy encode to the host's hardware encoder
+      // (VideoToolbox) via the file-queue helper — ~4x faster + off the CPU.
+      // The helper writes the finished MP4 directly to `final`.
+      await this.hostEncode(spec, src, final, subIdx);
 
-      fs.renameSync(out, final);
       const size = fs.statSync(final).size;
       const subsIncluded = subIdx != null && this.hasSubtitleStream(final);
       this.db.setTranscodeJobReady(spec.id, final, size, subsIncluded);
       this.safeUnlink(src); // drop the original once converted
-      logger.info('Transcode (local encode) ready', { jobId: spec.id, size, subsIncluded });
+      this.cleanJobArtifacts(spec.id);
+      logger.info('Transcode (host encode) ready', { jobId: spec.id, size, subsIncluded });
     } catch (err: any) {
       this.safeUnlink(src);
-      this.safeUnlink(out);
+      this.safeUnlink(final);
+      this.safeUnlink(`${final}.part`);
       // If canceled mid-flight, don't overwrite the canceled status
       const current = this.db.getTranscodeJob(spec.id);
       if (current?.status !== 'canceled') {
         logger.warn('Local encode failed', { jobId: spec.id, error: err?.message });
         this.db.setTranscodeJobFailed(spec.id, err?.message || 'Local encode failed');
       }
+      this.cleanJobArtifacts(spec.id);
     }
     this.pump();
+  }
+
+  // Hand the encode to the macOS host's VideoToolbox helper via the shared
+  // file queue. Writes a job spec (host paths), polls progress + the done
+  // marker; tracked in `active` (no child — cancel writes a .cancel marker).
+  private hostEncode(spec: JobSpec, src: string, out: string, subIdx: number | null): Promise<void> {
+    const jobsDir = path.join(config.transcode.tempDir, 'jobs');
+    fs.mkdirSync(jobsDir, { recursive: true });
+    // Translate a container cache path to the host's view, with a path
+    // boundary check (so /transcode-cache2/… can't be mistaken for inside).
+    const base = config.transcode.tempDir;
+    const toHost = (cp: string) =>
+      cp === base || cp.startsWith(base + path.sep)
+        ? config.transcode.hostTempDir + cp.slice(base.length)
+        : cp;
+    const jp = (ext: string) => path.join(jobsDir, `${spec.id}.${ext}`);
+    const height = parseInt(spec.preset.videoResolution.split('x')[1] || '1080', 10);
+    // VideoToolbox is a bit less bitrate-efficient than x264 — bump ~15%
+    const bitrateK = Math.round(spec.preset.maxVideoBitrate * 1.15);
+    const jobSpec = {
+      src: toHost(src),
+      out: toHost(out),
+      bitrateK,
+      height,
+      subIndex: subIdx,
+      audioBitrateK: 192,
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      // Register in active so pump() keeps this server busy; cancel() writes
+      // the .cancel marker via cancelHost.
+      this.active.set(spec.id, { spec, cancelHost: () => this.writeCancelMarker(spec.id) });
+
+      // Write the job atomically so the helper never reads a partial spec
+      try {
+        const tmp = jp('job.json.tmp');
+        fs.writeFileSync(tmp, JSON.stringify(jobSpec));
+        fs.renameSync(tmp, jp('job.json'));
+      } catch (e: any) {
+        this.active.delete(spec.id);
+        reject(new Error(`failed to queue host job: ${e.message}`));
+        return;
+      }
+
+      const dur = spec.durationSec || 0;
+      let lastAdvanceAt = Date.now();
+      let lastProg = -1;
+      const poll = setInterval(() => {
+        // Canceled out from under us (active removed) → stop
+        if (this.active.get(spec.id)?.spec !== spec) {
+          clearInterval(poll);
+          reject(new Error('canceled'));
+          return;
+        }
+        // Stall: no progress (and no done) for the timeout → give up
+        if (Date.now() - lastAdvanceAt > config.transcode.stallTimeoutMs) {
+          clearInterval(poll);
+          this.active.delete(spec.id);
+          this.writeCancelMarker(spec.id);
+          reject(new Error('host encode stalled (no progress)'));
+          return;
+        }
+        try {
+          const v = parseInt(fs.readFileSync(jp('progress'), 'utf8'), 10);
+          // Any change counts as liveness — a decrease means the helper
+          // restarted and is re-encoding from 0 (not a stall).
+          if (v !== lastProg) {
+            lastProg = v;
+            lastAdvanceAt = Date.now();
+            if (dur > 0) this.db.updateTranscodeJobProgress(spec.id, 15 + Math.min(84, (v / 1e6 / dur) * 85));
+          }
+        } catch {/* no progress yet */}
+        try {
+          const done = JSON.parse(fs.readFileSync(jp('done.json'), 'utf8'));
+          clearInterval(poll);
+          this.active.delete(spec.id);
+          if (done.ok) resolve();
+          else reject(new Error(done.error || 'host encode failed'));
+        } catch {/* not done yet */}
+      }, 2000);
+    });
+  }
+
+  private writeCancelMarker(jobId: string): void {
+    try {
+      fs.writeFileSync(path.join(config.transcode.tempDir, 'jobs', `${jobId}.cancel`), '1');
+    } catch {/* helper will also idle out */}
+  }
+
+  // Only delete container-owned artifacts. `.claimed` and `.cancel` belong to
+  // the helper (it consumes/removes them) — deleting `.cancel` here would race
+  // the helper's 2s cancel check and leave a zombie encode running.
+  private cleanJobArtifacts(jobId: string): void {
+    const jobsDir = path.join(config.transcode.tempDir, 'jobs');
+    for (const ext of ['job.json', 'job.json.tmp', 'progress', 'done.json']) {
+      this.safeUnlink(path.join(jobsDir, `${jobId}.${ext}`));
+    }
   }
 
   // Spawn one ffmpeg, tracking it in `active`, parsing -progress for real
@@ -401,7 +483,8 @@ export class TranscodeService {
     const entry = this.active.get(spec.id);
     if (entry) {
       this.active.delete(spec.id);
-      entry.child.kill('SIGKILL');
+      entry.child?.kill('SIGKILL');
+      entry.cancelHost?.();
     }
     this.db.setTranscodeJobFailed(spec.id, message);
     this.safeUnlink(this.partPath(spec.id));
@@ -421,9 +504,11 @@ export class TranscodeService {
     const entry = this.active.get(jobId);
     if (entry) {
       this.active.delete(jobId);
-      entry.child.kill('SIGKILL'); // the close handler sees it's gone and just pumps
+      entry.child?.kill('SIGKILL'); // download phase: close handler sees it's gone
+      entry.cancelHost?.(); // host encode phase: tell the helper to abort
       this.db.setTranscodeJobStatus(jobId, 'canceled');
-      this.safeUnlink(this.partPath(jobId));
+      this.deleteJobOutput(jobId); // .part + .mp4 + .src
+      this.cleanJobArtifacts(jobId);
       this.stopPlexSession(entry.spec);
       this.pump();
       return true;
@@ -474,7 +559,11 @@ export class TranscodeService {
     const interrupted = this.db.getInterruptedTranscodeJobs();
     for (const job of interrupted) {
       this.db.setTranscodeJobFailed(job.id, 'Interrupted by server restart');
+      // A host encode may still be running for this job (the helper outlives
+      // the container) — tell it to abort, then clean up.
+      this.writeCancelMarker(job.id);
       this.deleteJobOutput(job.id);
+      this.cleanJobArtifacts(job.id);
     }
     if (interrupted.length > 0) {
       logger.info(`Recovered ${interrupted.length} interrupted transcode jobs`);
@@ -496,15 +585,27 @@ export class TranscodeService {
     if (purged > 0) {
       logger.info(`Cleared ${purged} old failed/canceled transcode rows`);
     }
+    // Sweep orphaned job-queue artifacts (e.g. a .cancel left when the helper
+    // was down, or stray markers from a crash) older than 6h.
+    try {
+      const jobsDir = path.join(config.transcode.tempDir, 'jobs');
+      const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+      for (const name of fs.readdirSync(jobsDir)) {
+        const f = path.join(jobsDir, name);
+        try { if (fs.statSync(f).mtimeMs < cutoff) this.safeUnlink(f); } catch {}
+      }
+    } catch {/* jobs dir may not exist yet */}
   }
 
   // SIGTERM/SIGINT: kill active ffmpeg, release their Plex sessions, mark the
   // rows failed, and drop partial files so nothing outlives the process.
   shutdown(): void {
-    for (const [jobId, { child, spec }] of this.active) {
-      child.kill('SIGKILL');
+    for (const [jobId, { child, spec, cancelHost }] of this.active) {
+      child?.kill('SIGKILL');
+      cancelHost?.(); // tell the host helper to abort its encode
       this.db.setTranscodeJobFailed(jobId, 'Interrupted by server shutdown');
       this.deleteJobOutput(jobId); // .part + .mp4 + the pulled .src.mkv (can be huge)
+      this.cleanJobArtifacts(jobId);
       this.stopPlexSession(spec);
     }
     this.active.clear();

@@ -781,3 +781,26 @@ https://downloads.sortadrunk.com (cloudflared, config on M4 at
   `fleet/install-specs/librarydownloadarr.json`
 - **Upstream**: `kikootwo/LibraryDownloadarr` is the `upstream` git remote.
   Mobile/filename/tracking fixes here are candidates to PR back.
+
+---
+
+## Host transcode helper (hardware encoding)
+
+Remote conversions encode on the **macOS host** via VideoToolbox (the
+container can't reach the Mac's hardware encoder). The container downloads
+the original + drops a job file in `/Volumes/Media/lda-transcode-cache/jobs/`;
+a launchd helper on the M4 (`host-tools/transcode-helper.mjs`) runs
+`ffmpeg -c:v h264_videotoolbox` and writes the result back.
+
+**The helper must be running for remote conversions to complete** (home
+conversions don't use it). One-time install on the M4:
+
+```bash
+cp host-tools/com.parker.lda-transcode-helper.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.parker.lda-transcode-helper.plist
+launchctl kickstart -k gui/$(id -u)/com.parker.lda-transcode-helper
+```
+
+Logs: `~/Library/Logs/lda-transcode-helper.log`. KeepAlive restarts it if it
+dies. If the helper is down, remote conversions fail via the stall watchdog
+(~5 min) and can be retried.
