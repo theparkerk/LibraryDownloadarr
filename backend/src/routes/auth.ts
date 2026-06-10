@@ -180,11 +180,15 @@ export const createAuthRouter = (db: DatabaseService) => {
         return res.status(500).json({ error: 'Failed to validate server access' });
       }
 
-      // Create or update plex user (no serverUrl stored - always use admin's)
+      // Create or update plex user (no serverUrl stored - always use admin's).
+      // plexToken talks to the home server (share accessToken for shared
+      // users); plexAccountToken is their own plex.tv account token, used to
+      // enumerate other servers shared with their account.
       const plexUser = db.createOrUpdatePlexUser({
         username: authResponse.user.username,
         email: authResponse.user.email,
         plexToken: userToken,
+        plexAccountToken: authResponse.authToken,
         plexId: authResponse.user.uuid,
       });
 

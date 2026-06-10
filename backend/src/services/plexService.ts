@@ -710,3 +710,12 @@ export class PlexService {
 }
 
 export const plexService = new PlexService();
+
+// Per-request client bound to one server. The shared singleton's URL is
+// mutable global state — fine when every request targets the same admin
+// server, a race condition once requests can target different servers.
+export const createPlexClient = (urlOrHostname: string): PlexService => {
+  const client = new PlexService();
+  client.setServerConnection(urlOrHostname, '');
+  return client;
+};

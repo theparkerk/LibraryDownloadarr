@@ -8,12 +8,16 @@ export interface AuthRequest extends Request {
     username: string;
     isAdmin: boolean;
     plexToken?: string;
+    plexAccountToken?: string;
     serverUrl?: string;
   };
   authSession?: {
     id: string;
     token: string;
   };
+  // Server scope carried by a validated download token (?dl=). Takes
+  // precedence over any client-supplied serverId.
+  downloadServerId?: string;
 }
 
 // Resolves a user id to the request-user shape, checking admin users first
@@ -36,6 +40,7 @@ export const resolveUserById = (db: DatabaseService, userId: string): AuthReques
       username: plexUser.username,
       isAdmin: plexUser.isAdmin,
       plexToken: plexUser.plexToken,
+      plexAccountToken: plexUser.plexAccountToken,
       serverUrl: plexUser.serverUrl,
     };
   }

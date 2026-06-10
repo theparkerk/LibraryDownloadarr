@@ -16,6 +16,13 @@ export interface Library {
   type: string;
 }
 
+export interface ServerInfo {
+  machineId: string;
+  name: string;
+  owned: boolean;
+  isHome: boolean;
+}
+
 export interface MediaItem {
   ratingKey: string;
   key: string;

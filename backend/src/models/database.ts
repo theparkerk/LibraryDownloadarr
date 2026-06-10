@@ -8,7 +8,12 @@ export interface User {
   id: string;
   username: string;
   email: string;
+  // Token for talking to the home server (the share accessToken for users
+  // whose access comes via a Plex share)
   plexToken?: string;
+  // The user's own plex.tv account token (from OAuth) — required to
+  // enumerate servers shared with their account; distinct from plexToken
+  plexAccountToken?: string;
   plexId?: string;
   serverUrl?: string;
   isAdmin: boolean;
@@ -49,6 +54,7 @@ export interface DownloadToken {
   scopeType: DownloadScopeType;
   ratingKey: string;
   partKey?: string;
+  serverId?: string;
   expiresAt: number;
   createdAt: number;
 }
@@ -109,6 +115,18 @@ export class DatabaseService {
     if (hasServerUrl.count === 0) {
       logger.info('Adding server_url column to plex_users table');
       this.db.exec('ALTER TABLE plex_users ADD COLUMN server_url TEXT');
+    }
+
+    // Migration: multi-server support — keep the user's own plex.tv account
+    // token (for enumerating their shared servers) separate from the
+    // home-server access token. Populated on next login for existing users.
+    const hasAccountToken = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('plex_users') WHERE name='plex_account_token'
+    `).get() as { count: number };
+
+    if (hasAccountToken.count === 0) {
+      logger.info('Adding plex_account_token column to plex_users table');
+      this.db.exec('ALTER TABLE plex_users ADD COLUMN plex_account_token TEXT');
     }
 
     // Migrate sessions table if it has the old FOREIGN KEY constraint
@@ -183,6 +201,17 @@ export class DatabaseService {
       )
     `);
 
+    // Migration: multi-server support — tokens are scoped to the server
+    // they were issued for (NULL = home server)
+    const hasServerId = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('download_tokens') WHERE name='server_id'
+    `).get() as { count: number };
+
+    if (hasServerId.count === 0) {
+      logger.info('Adding server_id column to download_tokens table');
+      this.db.exec('ALTER TABLE download_tokens ADD COLUMN server_id TEXT');
+    }
+
     logger.info('Database tables initialized');
   }
 
@@ -237,10 +266,10 @@ export class DatabaseService {
       // SECURITY: No longer store serverUrl - always use admin's configured server
       const stmt = this.db.prepare(`
         UPDATE plex_users
-        SET username = ?, email = ?, plex_token = ?, server_url = NULL, last_login = ?
+        SET username = ?, email = ?, plex_token = ?, plex_account_token = ?, server_url = NULL, last_login = ?
         WHERE plex_id = ?
       `);
-      stmt.run(plexUser.username, plexUser.email, plexUser.plexToken, Date.now(), plexUser.plexId);
+      stmt.run(plexUser.username, plexUser.email, plexUser.plexToken, plexUser.plexAccountToken ?? null, Date.now(), plexUser.plexId);
       return { ...existing, ...plexUser, serverUrl: undefined, lastLogin: Date.now() };
     }
 
@@ -248,10 +277,10 @@ export class DatabaseService {
     const createdAt = Date.now();
     // SECURITY: No longer store serverUrl - always use admin's configured server
     const stmt = this.db.prepare(`
-      INSERT INTO plex_users (id, username, email, plex_token, plex_id, server_url, created_at, last_login)
-      VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+      INSERT INTO plex_users (id, username, email, plex_token, plex_account_token, plex_id, server_url, created_at, last_login)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `);
-    stmt.run(id, plexUser.username, plexUser.email, plexUser.plexToken, plexUser.plexId, createdAt, createdAt);
+    stmt.run(id, plexUser.username, plexUser.email, plexUser.plexToken, plexUser.plexAccountToken ?? null, plexUser.plexId, createdAt, createdAt);
 
     return { id, ...plexUser, isAdmin: false, createdAt, lastLogin: createdAt };
   }
@@ -360,6 +389,7 @@ export class DatabaseService {
     scopeType: DownloadScopeType,
     ratingKey: string,
     partKey?: string,
+    serverId?: string,
     ttlMs: number = 24 * 60 * 60 * 1000
   ): DownloadToken {
     const id = this.generateId();
@@ -368,11 +398,11 @@ export class DatabaseService {
     const expiresAt = createdAt + ttlMs;
 
     this.db.prepare(`
-      INSERT INTO download_tokens (id, token, user_id, scope_type, rating_key, part_key, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, token, userId, scopeType, ratingKey, partKey ?? null, expiresAt, createdAt);
+      INSERT INTO download_tokens (id, token, user_id, scope_type, rating_key, part_key, server_id, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, token, userId, scopeType, ratingKey, partKey ?? null, serverId ?? null, expiresAt, createdAt);
 
-    return { id, token, userId, scopeType, ratingKey, partKey, expiresAt, createdAt };
+    return { id, token, userId, scopeType, ratingKey, partKey, serverId, expiresAt, createdAt };
   }
 
   getDownloadToken(token: string): DownloadToken | undefined {
@@ -387,6 +417,7 @@ export class DatabaseService {
       scopeType: row.scope_type,
       ratingKey: row.rating_key,
       partKey: row.part_key ?? undefined,
+      serverId: row.server_id ?? undefined,
       expiresAt: row.expires_at,
       createdAt: row.created_at,
     };
@@ -455,6 +486,7 @@ export class DatabaseService {
       username: row.username,
       email: row.email,
       plexToken: row.plex_token,
+      plexAccountToken: row.plex_account_token ?? undefined,
       plexId: row.plex_id,
       serverUrl: row.server_url,
       isAdmin: row.is_admin === 1,

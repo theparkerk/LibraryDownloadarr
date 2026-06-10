@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { api } from '../services/api';
-import { Library } from '../types';
+import { api, getSelectedServerId, selectServer } from '../services/api';
+import { Library, ServerInfo } from '../types';
 import { useAuthStore } from '../stores/authStore';
 
 interface SidebarProps {
@@ -11,13 +11,16 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const [libraries, setLibraries] = useState<Library[]>([]);
+  const [servers, setServers] = useState<ServerInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useAuthStore();
+  const selectedServerId = getSelectedServerId();
 
   useEffect(() => {
     loadLibraries();
+    loadServers();
   }, []);
 
   const loadLibraries = async () => {
@@ -30,6 +33,28 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       setIsLoading(false);
     }
   };
+
+  const loadServers = async () => {
+    try {
+      const data = await api.getServers();
+      setServers(data);
+      // A stale selection (e.g. a server no longer shared with this
+      // account) would 403 every request — snap back to home
+      const selected = getSelectedServerId();
+      if (
+        selected !== 'home' &&
+        !data.some((s) => s.machineId === selected)
+      ) {
+        selectServer('home');
+      }
+    } catch (error) {
+      console.error('Failed to load servers:', error);
+    }
+  };
+
+  const serverValue = servers.some((s) => s.machineId === selectedServerId && !s.isHome)
+    ? selectedServerId
+    : 'home';
 
   const isActive = (path: string) => location.pathname === path;
 
@@ -64,6 +89,31 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
         }}
       >
         <nav className="space-y-2">
+          {servers.length > 1 && (
+            <div className="px-2 pb-2">
+              <label className="block px-2 pb-1 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                Server
+              </label>
+              <select
+                value={serverValue}
+                onChange={(e) =>
+                  selectServer(e.target.value === 'home' ? 'home' : e.target.value)
+                }
+                className="w-full bg-dark-200 border border-dark-50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary-500"
+              >
+                {servers.map((server) => (
+                  <option
+                    key={server.machineId}
+                    value={server.isHome ? 'home' : server.machineId}
+                  >
+                    {server.name}
+                    {server.isHome ? ' (home)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <button
             onClick={() => handleNavigate('/')}
             className={`w-full text-left px-4 py-2 rounded-lg transition-colors ${

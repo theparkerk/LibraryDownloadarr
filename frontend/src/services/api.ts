@@ -5,8 +5,23 @@ import {
   Library,
   MediaItem,
   PlexPin,
+  ServerInfo,
   Settings,
 } from '../types';
+
+// Which Plex server the UI is browsing. 'home' (or unset) = the
+// admin-configured server; anything else is a plex.tv machine id the
+// backend verifies against the user's own account.
+const SERVER_KEY = 'selectedServerId';
+
+export const getSelectedServerId = (): string => localStorage.getItem(SERVER_KEY) || 'home';
+
+// Switching servers does a full reload: every page refetches against the
+// new server and no stale cross-server state survives.
+export const selectServer = (machineId: string): void => {
+  localStorage.setItem(SERVER_KEY, machineId);
+  window.location.assign('/');
+};
 
 class ApiClient {
   private client: AxiosInstance;
@@ -19,11 +34,15 @@ class ApiClient {
       },
     });
 
-    // Add token to requests
+    // Add token + selected server to requests
     this.client.interceptors.request.use((config) => {
       const token = localStorage.getItem('token');
       if (token) {
         config.headers.Authorization = `Bearer ${token}`;
+      }
+      const serverId = getSelectedServerId();
+      if (serverId && serverId !== 'home') {
+        config.params = { ...(config.params || {}), serverId };
       }
       return config;
     });
@@ -34,6 +53,9 @@ class ApiClient {
       (error) => {
         if (error.response?.status === 401) {
           localStorage.removeItem('token');
+          // Server selection is per-login: don't let the next user on this
+          // browser inherit someone else's selected server
+          localStorage.removeItem(SERVER_KEY);
           window.location.href = '/login';
         }
         return Promise.reject(error);
@@ -78,6 +100,7 @@ class ApiClient {
   async logout(): Promise<void> {
     await this.client.post('/auth/logout');
     localStorage.removeItem('token');
+    localStorage.removeItem(SERVER_KEY);
   }
 
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
@@ -85,6 +108,12 @@ class ApiClient {
       currentPassword,
       newPassword,
     });
+  }
+
+  // Server endpoints
+  async getServers(): Promise<ServerInfo[]> {
+    const response = await this.client.get<{ servers: ServerInfo[] }>('/servers');
+    return response.data.servers;
   }
 
   // Library endpoints
@@ -188,7 +217,9 @@ class ApiClient {
 
   getThumbnailUrl(ratingKey: string, path: string): string {
     const token = localStorage.getItem('token');
-    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}`;
+    const serverId = getSelectedServerId();
+    const serverParam = serverId && serverId !== 'home' ? `&serverId=${encodeURIComponent(serverId)}` : '';
+    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}${serverParam}`;
   }
 
   // Settings endpoints

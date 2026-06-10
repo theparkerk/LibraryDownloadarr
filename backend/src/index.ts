@@ -9,6 +9,7 @@ import { logger } from './utils/logger';
 import { createAuthRouter } from './routes/auth';
 import { createLibrariesRouter } from './routes/libraries';
 import { createMediaRouter } from './routes/media';
+import { createServersRouter } from './routes/servers';
 import { createSettingsRouter } from './routes/settings';
 import { createLogsRouter } from './routes/logs';
 
@@ -50,6 +51,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', createAuthRouter(db));
 app.use('/api/libraries', createLibrariesRouter(db));
 app.use('/api/media', createMediaRouter(db));
+app.use('/api/servers', createServersRouter(db));
 app.use('/api/settings', createSettingsRouter(db));
 app.use('/api/logs', createLogsRouter(db));
 
