@@ -693,7 +693,12 @@ export class PlexService {
       });
 
       const allMedia: PlexMedia[] = [];
-      const itemsPerLibrary = Math.ceil(limit / libraries.length) + 5;
+      // Fetch a healthy slice from EACH library and keep them all, rather than
+      // merging everything and slicing to a global top-N — otherwise a TV
+      // library that adds many episodes crowds movies out of the result, so
+      // the Movies filter shows almost nothing. Each library contributes its
+      // newest `itemsPerLibrary`.
+      const itemsPerLibrary = Math.max(15, Math.ceil(limit / Math.max(1, libraries.length)));
 
       for (const library of libraries) {
         try {
@@ -725,10 +730,12 @@ export class PlexService {
         }
       }
 
+      // Keep all fetched items (each library's newest `itemsPerLibrary`),
+      // date-sorted — no global slice that would starve less-frequently-added
+      // types like movies. Bounded by itemsPerLibrary × libraryCount.
       const sorted = allMedia
         .filter(m => m.addedAt)
-        .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-        .slice(0, limit);
+        .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
 
       logger.debug('Recently added query completed', {
         requestedLimit: limit,

@@ -256,9 +256,10 @@ export const getRecentlyAddedAllServers = async (
       return plex.getRecentlyAdded(s.token, limit);
     });
     const merged = mergeItems(results.map((r) => ({ server: r.server, items: r.value })));
-    // Each server already returns newest-first; the merged set re-sorts by
-    // addedAt and trims to the requested limit
+    // getRecentlyAdded already balances per library on each server; keep the
+    // full balanced set (date-sorted) so movies aren't starved by episodes —
+    // don't slice back to `limit` here.
     merged.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-    return { items: merged.slice(0, limit), failures };
+    return { items: merged, failures };
   });
 };
