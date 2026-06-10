@@ -2,7 +2,12 @@ import { Router } from 'express';
 import { DatabaseService } from '../models/database';
 import { createPlexClient } from '../services/plexService';
 import { resolveServer } from '../services/serverRegistry';
-import { listAllServersLibraries, getAllServersLibraryContent } from '../services/crossServerService';
+import {
+  listAllServersLibraries,
+  getAllServersLibraryContent,
+  listAllServersGenres,
+  getAllServersGenreContent,
+} from '../services/crossServerService';
 import { logger } from '../utils/logger';
 import { AuthRequest, createAuthMiddleware } from '../middleware/auth';
 
@@ -87,7 +92,8 @@ export const createLibrariesRouter = (db: DatabaseService) => {
     try {
       const { libraryKey } = req.params;
       if (requestedServerId(req) === 'all') {
-        return res.json({ genres: [] }); // genre browse is per-server
+        const genres = await listAllServersGenres(db, req.user, libraryKey);
+        return res.json({ genres });
       }
       const { token, serverUrl, error } = await resolveServerContext(req);
       if (error) return res.status(403).json({ error });
@@ -106,6 +112,11 @@ export const createLibrariesRouter = (db: DatabaseService) => {
   router.get('/:libraryKey/genre/:genreKey/content', authMiddleware, async (req: AuthRequest, res) => {
     try {
       const { libraryKey, genreKey } = req.params;
+      if (requestedServerId(req) === 'all') {
+        // genreKey is the genre title in All-Servers mode
+        const { items } = await getAllServersGenreContent(db, req.user, libraryKey, genreKey);
+        return res.json({ content: items });
+      }
       const { token, serverUrl, error } = await resolveServerContext(req);
       if (error) return res.status(403).json({ error });
       if (!token || !serverUrl) return res.status(500).json({ error: 'Plex server not configured' });

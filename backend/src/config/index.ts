@@ -19,8 +19,9 @@ export const config = {
     tempDir:
       process.env.TRANSCODE_TEMP_DIR ||
       path.join(path.dirname(process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'x')), 'transcode-cache'),
-    // Software transcode is heavy; one at a time by default
-    maxConcurrent: parseInt(process.env.TRANSCODE_MAX_CONCURRENT || '1', 10),
+    // Global safety cap on simultaneous ffmpeg jobs. One job runs per server
+    // (home + each remote in parallel); this bounds the total across servers.
+    maxConcurrent: parseInt(process.env.TRANSCODE_MAX_CONCURRENT || '3', 10),
     maxQueue: parseInt(process.env.TRANSCODE_MAX_QUEUE || '10', 10),
     // A ready converted file is kept this long (on our server) before the
     // hourly sweep deletes it + its job row. 24h by default.

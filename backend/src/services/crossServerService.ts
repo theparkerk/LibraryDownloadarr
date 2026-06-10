@@ -204,6 +204,65 @@ export const listAllServersLibraries = async (db: DatabaseService, user?: Reques
     .map((t) => ({ key: `type:${t}`, title: TYPE_LABELS[t], type: t }));
 };
 
+const typeOf = (syntheticKey: string) =>
+  syntheticKey.startsWith('type:') ? syntheticKey.slice(5) : syntheticKey;
+
+// Genres merged across servers. Genre IDs differ per server, so the merged
+// genre is keyed by its (lowercased) title; the content lookup re-matches by
+// title on each server.
+export const listAllServersGenres = async (
+  db: DatabaseService,
+  user: RequestUser | undefined,
+  syntheticKey: string
+): Promise<{ key: string; title: string }[]> => {
+  const type = typeOf(syntheticKey);
+  const servers = await resolveAllServers(db, user);
+  const { results } = await fanOut(servers, async (s) => {
+    const plex = createPlexClient(s.serverUrl);
+    const libs = await plex.getLibraries(s.token);
+    const matching = libs.filter((l) => l.type === type);
+    const lists = await Promise.all(matching.map((l) => plex.getGenres(l.key, s.token)));
+    return lists.flat();
+  });
+  const byTitle = new Map<string, string>();
+  for (const { value } of results) {
+    for (const g of value) {
+      const k = g.title.trim().toLowerCase();
+      if (k && !byTitle.has(k)) byTitle.set(k, g.title);
+    }
+  }
+  return Array.from(byTitle.values())
+    .sort((a, b) => a.localeCompare(b))
+    .map((t) => ({ key: t, title: t })); // key = title (cross-server handle)
+};
+
+export const getAllServersGenreContent = async (
+  db: DatabaseService,
+  user: RequestUser | undefined,
+  syntheticKey: string,
+  genreTitle: string
+): Promise<MergeResult> => {
+  const type = typeOf(syntheticKey);
+  const want = genreTitle.trim().toLowerCase();
+  return cached(`${user?.id}:genre:${type}:${want}`, MERGE_TTL_MS.browse, async () => {
+    const servers = await resolveAllServers(db, user);
+    const { results, failures } = await fanOut(servers, async (s) => {
+      const plex = createPlexClient(s.serverUrl);
+      const libs = await plex.getLibraries(s.token);
+      const matching = libs.filter((l) => l.type === type);
+      const out: PlexMedia[] = [];
+      for (const lib of matching) {
+        const genres = await plex.getGenres(lib.key, s.token);
+        const g = genres.find((x) => x.title.trim().toLowerCase() === want);
+        if (g) out.push(...(await plex.getGenreContent(lib.key, g.key, s.token)));
+      }
+      return out;
+    });
+    const items = mergeItems(results.map((r) => ({ server: r.server, items: r.value })));
+    return { items, failures };
+  });
+};
+
 export const getAllServersLibraryContent = async (
   db: DatabaseService,
   user: RequestUser | undefined,

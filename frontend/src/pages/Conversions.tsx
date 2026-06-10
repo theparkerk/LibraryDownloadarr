@@ -53,7 +53,10 @@ export const Conversions: React.FC = () => {
   const retry = async (job: TranscodeJobView) => {
     setRetryingId(job.id);
     try {
-      await api.startTranscode(job.ratingKey, job.quality, job.serverId, job.subtitles);
+      // Pin to the job's OWN server ('home' when it has none) — otherwise the
+      // request inherits the sidebar's selected server, which can be a
+      // different one (or 'All Servers') and the backend rejects it.
+      await api.startTranscode(job.ratingKey, job.quality, job.serverId || 'home', job.subtitles);
       refreshConversions();
     } finally {
       setTimeout(() => setRetryingId(null), 3000);

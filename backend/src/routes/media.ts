@@ -489,11 +489,11 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
       // own processing job, to estimate queued run times. Staying within the
       // user's own jobs keeps the endpoint owner-scoped (never exposes another
       // user's remaining time); fall back to ~4x realtime.
-      const processing = jobs.find((j) => j.status === 'processing');
+      const anyProcessing = jobs.find((j) => j.status === 'processing');
       let speedFactor = 4;
-      if (processing?.startedAt && processing.progress > 0 && processing.durationSec) {
-        const wall = (now - processing.startedAt) / 1000;
-        if (wall > 2) speedFactor = Math.max(0.5, (processing.progress / 100) * processing.durationSec / wall);
+      if (anyProcessing?.startedAt && anyProcessing.progress > 0 && anyProcessing.durationSec) {
+        const wall = (now - anyProcessing.startedAt) / 1000;
+        if (wall > 2) speedFactor = Math.max(0.5, (anyProcessing.progress / 100) * anyProcessing.durationSec / wall);
       }
       const fullEstimate = (j: { durationSec?: number }) =>
         j.durationSec ? j.durationSec / speedFactor : null;
@@ -502,11 +502,16 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         return fullEstimate(j);
       };
 
-      // Queue order = creation order among queued jobs
+      // Servers convert in parallel, so a queued job only waits behind work on
+      // its OWN server. Bucket queue/processing by server.
+      const serverKey = (j: { serverId?: string }) => j.serverId || 'home';
       const queuedAsc = jobs
         .filter((j) => j.status === 'queued')
         .sort((a, b) => a.createdAt - b.createdAt);
-      const processingRemaining = processing ? remainingOf(processing) ?? 0 : 0;
+      const processingByServer = new Map<string, typeof jobs[number]>();
+      for (const p of jobs.filter((j) => j.status === 'processing')) {
+        if (!processingByServer.has(serverKey(p))) processingByServer.set(serverKey(p), p);
+      }
 
       const out = jobs.map((j) => {
         let etaSec: number | null = null;
@@ -514,10 +519,14 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         if (j.status === 'processing') {
           etaSec = remainingOf(j);
         } else if (j.status === 'queued') {
-          const idx = queuedAsc.findIndex((q) => q.id === j.id); // 0-based
+          const sk = serverKey(j);
+          const sameServerQueue = queuedAsc.filter((q) => serverKey(q) === sk);
+          const idx = sameServerQueue.findIndex((q) => q.id === j.id); // 0-based within its server
           queuePosition = idx + 1;
-          const aheadTime = queuedAsc.slice(0, idx).reduce((sum, q) => sum + (fullEstimate(q) || 0), 0);
-          etaSec = processingRemaining + aheadTime + (fullEstimate(j) || 0);
+          const proc = processingByServer.get(sk);
+          const procRemaining = proc ? remainingOf(proc) ?? 0 : 0;
+          const aheadTime = sameServerQueue.slice(0, idx).reduce((sum, q) => sum + (fullEstimate(q) || 0), 0);
+          etaSec = procRemaining + aheadTime + (fullEstimate(j) || 0);
         }
         // A ready job whose file is gone (TTL sweep races, or removed) should
         // read as 'expired' so the panel offers a re-convert instead of a

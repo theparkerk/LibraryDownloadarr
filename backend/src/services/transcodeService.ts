@@ -96,12 +96,28 @@ export class TranscodeService {
     this.pump();
   }
 
+  // Run one conversion per server in parallel (a server only does one at a
+  // time, but home + each remote can encode simultaneously), capped by a
+  // global safety limit so we never spawn too many ffmpeg at once.
   private pump(): void {
-    while (this.active.size < config.transcode.maxConcurrent && this.queue.length > 0) {
-      const spec = this.queue.shift()!;
-      // Skip jobs canceled while queued
+    const busy = new Set<string>();
+    for (const { spec } of this.active.values()) busy.add(spec.serverUrl);
+
+    let i = 0;
+    while (i < this.queue.length) {
+      if (this.active.size >= config.transcode.maxConcurrent) break; // global cap
+      const spec = this.queue[i];
       const job = this.db.getTranscodeJob(spec.id);
-      if (!job || job.status === 'canceled') continue;
+      if (!job || job.status === 'canceled') {
+        this.queue.splice(i, 1);
+        continue;
+      }
+      if (busy.has(spec.serverUrl)) {
+        i++; // that server is already converting; leave this one queued
+        continue;
+      }
+      this.queue.splice(i, 1);
+      busy.add(spec.serverUrl);
       this.run(spec);
     }
   }
