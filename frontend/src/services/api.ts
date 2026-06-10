@@ -169,6 +169,20 @@ class ApiClient {
     return response.data.content;
   }
 
+  async getGenres(libraryKey: string): Promise<{ key: string; title: string }[]> {
+    const response = await this.client.get<{ genres: { key: string; title: string }[] }>(
+      `/libraries/${libraryKey}/genres`
+    );
+    return response.data.genres;
+  }
+
+  async getGenreContent(libraryKey: string, genreKey: string): Promise<MediaItem[]> {
+    const response = await this.client.get<{ content: MediaItem[] }>(
+      `/libraries/${libraryKey}/genre/${encodeURIComponent(genreKey)}/content`
+    );
+    return response.data.content;
+  }
+
   // Media endpoints
   async getRecentlyAdded(limit: number = 20): Promise<MediaItem[]> {
     const response = await this.client.get<{ media: MediaItem[] }>('/media/recently-added', {

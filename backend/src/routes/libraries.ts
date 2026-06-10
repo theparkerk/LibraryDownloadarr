@@ -82,6 +82,43 @@ export const createLibrariesRouter = (db: DatabaseService) => {
     }
   });
 
+  // Genres in a library (Categories tab)
+  router.get('/:libraryKey/genres', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { libraryKey } = req.params;
+      if (requestedServerId(req) === 'all') {
+        return res.json({ genres: [] }); // genre browse is per-server
+      }
+      const { token, serverUrl, error } = await resolveServerContext(req);
+      if (error) return res.status(403).json({ error });
+      if (!token || !serverUrl) return res.status(500).json({ error: 'Plex server not configured' });
+
+      const plex = createPlexClient(serverUrl);
+      const genres = await plex.getGenres(libraryKey, token);
+      return res.json({ genres });
+    } catch (error) {
+      logger.error('Failed to get genres', { error });
+      return res.status(500).json({ error: 'Failed to get genres' });
+    }
+  });
+
+  // Items in a library filtered to one genre
+  router.get('/:libraryKey/genre/:genreKey/content', authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { libraryKey, genreKey } = req.params;
+      const { token, serverUrl, error } = await resolveServerContext(req);
+      if (error) return res.status(403).json({ error });
+      if (!token || !serverUrl) return res.status(500).json({ error: 'Plex server not configured' });
+
+      const plex = createPlexClient(serverUrl);
+      const content = await plex.getGenreContent(libraryKey, genreKey, token);
+      return res.json({ content });
+    } catch (error) {
+      logger.error('Failed to get genre content', { error });
+      return res.status(500).json({ error: 'Failed to get genre content' });
+    }
+  });
+
   // Get items inside a collection
   router.get('/collections/:collectionRatingKey/content', authMiddleware, async (req: AuthRequest, res) => {
     try {

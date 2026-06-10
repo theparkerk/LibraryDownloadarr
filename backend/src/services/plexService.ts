@@ -628,6 +628,43 @@ export class PlexService {
     }
   }
 
+  // Genres available in a library (the "Categories" browse buckets).
+  async getGenres(libraryKey: string, userToken?: string): Promise<{ key: string; title: string }[]> {
+    if (!this.plexUrl) {
+      throw new Error('Plex server not configured');
+    }
+    try {
+      const response = await axios.get(`${this.plexUrl}/library/sections/${libraryKey}/genre`, this.getAxiosConfig({
+        'X-Plex-Token': userToken || '',
+        'Accept': 'application/json',
+      }));
+      const dirs = response.data?.MediaContainer?.Directory || [];
+      return dirs.map((d: any) => ({ key: String(d.key), title: d.title }));
+    } catch (error) {
+      logger.error('Failed to get genres', { error });
+      throw new Error('Failed to get genres');
+    }
+  }
+
+  // Items in a library filtered to one genre.
+  async getGenreContent(libraryKey: string, genreKey: string, userToken?: string): Promise<PlexMedia[]> {
+    if (!this.plexUrl) {
+      throw new Error('Plex server not configured');
+    }
+    try {
+      const config = this.getAxiosConfig({
+        'X-Plex-Token': userToken || '',
+        'Accept': 'application/json',
+      });
+      config.params = { genre: genreKey };
+      const response = await axios.get(`${this.plexUrl}/library/sections/${libraryKey}/all`, config);
+      return response.data?.MediaContainer?.Metadata || [];
+    } catch (error) {
+      logger.error('Failed to get genre content', { error });
+      throw new Error('Failed to get genre content');
+    }
+  }
+
   // Items inside a collection.
   async getCollectionContent(collectionRatingKey: string, userToken?: string): Promise<PlexMedia[]> {
     if (!this.plexUrl) {

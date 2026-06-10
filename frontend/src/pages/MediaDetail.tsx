@@ -7,6 +7,7 @@ import { MediaItem, SourceRef } from '../types';
 import { useDownloads } from '../contexts/DownloadContext';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { QualityMenu, QualityChoice } from '../components/QualityMenu';
+import { refreshConversions } from '../stores/conversionsStore';
 
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
@@ -194,6 +195,33 @@ export const MediaDetail: React.FC = () => {
       await startDownload({ type: 'season', ratingKey: seasonRatingKey, serverId: srcServerId }, zipFilename, `${seasonTitle} (Full Season)`);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to start season download');
+    }
+  };
+
+  // Device-quality season: there's no single converted ZIP — queue a
+  // conversion job per episode (download each from the Conversions panel).
+  const handleSeasonConvert = async (seasonRatingKey: string, seasonTitle: string, quality: QualityChoice) => {
+    try {
+      const episodes = episodesBySeason[seasonRatingKey] || (await api.getEpisodes(seasonRatingKey, srcServerId));
+      let queued = 0;
+      let full = false;
+      for (const ep of episodes) {
+        if (!ep.Media?.[0]?.Part?.[0] || !ep.ratingKey) continue;
+        try {
+          await api.startTranscode(ep.ratingKey, quality, srcServerId, subsEnabled);
+          queued++;
+        } catch (e: any) {
+          if (e.response?.status === 429) { full = true; break; } // queue cap hit
+          throw e;
+        }
+      }
+      refreshConversions();
+      window.alert(
+        `Queued ${queued} episode${queued === 1 ? '' : 's'} of ${seasonTitle} for conversion — track them under Conversions.` +
+          (full ? '\n\nThe queue is full; convert the rest once some finish.' : '')
+      );
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to queue season conversion');
     }
   };
 
@@ -514,19 +542,16 @@ export const MediaDetail: React.FC = () => {
                                     {expandedSeasons[season.ratingKey] ? '▼' : '▶'}
                                   </span>
                                 </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleSeasonDownload(season.ratingKey, season.title);
-                                  }}
-                                  disabled={isDownloading(season.ratingKey)}
-                                  className="btn-primary ml-2 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap text-sm md:text-base px-3 md:px-4 py-2"
-                                  title="Download entire season as ZIP"
-                                >
-                                  {isDownloading(season.ratingKey)
-                                    ? '⏳ Starting...'
-                                    : '📦 Season'}
-                                </button>
+                                <div className="ml-2" onClick={(e) => e.stopPropagation()}>
+                                  <QualityMenu
+                                    busy={isDownloading(season.ratingKey)}
+                                    onSelect={(q) =>
+                                      q === 'original'
+                                        ? handleSeasonDownload(season.ratingKey, season.title)
+                                        : handleSeasonConvert(season.ratingKey, season.title, q)
+                                    }
+                                  />
+                                </div>
                               </div>
 
                               {expandedSeasons[season.ratingKey] && (
