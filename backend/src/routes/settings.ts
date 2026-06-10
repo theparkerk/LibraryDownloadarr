@@ -80,19 +80,23 @@ export const createSettingsRouter = (db: DatabaseService) => {
     }
   });
 
-  // Test Plex connection (admin only)
+  // Test Plex connection (admin only). Fields left blank in the form fall
+  // back to saved settings — the old path tested without a token (Plex
+  // answers 401 to a tokenless root request) and relied on in-memory state
+  // that's empty after a restart, so it reported failure even when the
+  // saved configuration worked.
   router.post('/test-connection', authMiddleware, adminMiddleware, async (req: AuthRequest, res) => {
     try {
       const { plexUrl, plexToken } = req.body;
+      const url = plexUrl || db.getSetting('plex_url') || '';
+      const token = plexToken || db.getSetting('plex_token') || '';
 
-      // If URL and token provided in request, test those; otherwise test saved settings
-      if (plexUrl && plexToken) {
-        const isConnected = await plexService.testConnectionWithCredentials(plexUrl, plexToken);
-        return res.json({ connected: isConnected });
-      } else {
-        const isConnected = await plexService.testConnection();
-        return res.json({ connected: isConnected });
+      if (!url || !token) {
+        return res.json({ connected: false, error: 'Plex URL and token are not configured yet' });
       }
+
+      const isConnected = await plexService.testConnectionWithCredentials(url, token);
+      return res.json({ connected: isConnected });
     } catch (error) {
       logger.error('Connection test failed', { error });
       return res.status(500).json({ error: 'Connection test failed', connected: false });

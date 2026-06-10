@@ -156,20 +156,6 @@ export class PlexService {
     this.initializeClient(urlOrHostname, token);
   }
 
-  async testConnection(): Promise<boolean> {
-    if (!this.plexUrl) {
-      return false;
-    }
-
-    try {
-      await axios.get(`${this.plexUrl}/`, this.getAxiosConfig());
-      return true;
-    } catch (error) {
-      logger.error('Failed to connect to Plex server', { error });
-      return false;
-    }
-  }
-
   async testConnectionWithCredentials(urlOrHostname: string, token: string): Promise<boolean> {
     try {
       const connectionDetails = this.parseConnectionDetails(urlOrHostname);
