@@ -47,6 +47,11 @@ export interface PlexMedia {
   originallyAvailableAt?: string;
   studio?: string;
   contentRating?: string;
+  // Watched state (per-account, per-server). Movies/episodes: viewCount.
+  // Shows: viewedLeafCount of leafCount episodes watched.
+  viewCount?: number;
+  viewedLeafCount?: number;
+  leafCount?: number;
   librarySectionID?: string;
   librarySectionTitle?: string;
   grandparentTitle?: string;

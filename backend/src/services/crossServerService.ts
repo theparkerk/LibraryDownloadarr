@@ -138,6 +138,16 @@ const mergeItems = (
       const existing = map.get(key);
       if (existing) {
         existing.availability.push(ref(item));
+        // Reconcile watched state across servers: watch state is per-account
+        // per-server, so a show watched on the home server reads as unwatched
+        // on a friend's server. Treat the title as watched if it's watched on
+        // ANY server the user has it on — keep the most-watched values.
+        if ((item.viewCount || 0) > (existing.viewCount || 0)) existing.viewCount = item.viewCount;
+        const watchedFrac = (m: PlexMedia) => (m.leafCount && m.leafCount > 0 ? (m.viewedLeafCount || 0) / m.leafCount : 0);
+        if (watchedFrac(item) > watchedFrac(existing)) {
+          existing.viewedLeafCount = item.viewedLeafCount;
+          existing.leafCount = item.leafCount;
+        }
       } else {
         map.set(key, {
           ...item,
