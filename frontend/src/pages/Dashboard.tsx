@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
@@ -9,6 +9,7 @@ import { Library, MediaItem } from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { useMobileMenu } from '../hooks/useMobileMenu';
 import { useMediaView } from '../hooks/useMediaView';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 
 export const Dashboard: React.FC = () => {
   const [recentlyAdded, setRecentlyAdded] = useState<MediaItem[]>([]);
@@ -19,6 +20,8 @@ export const Dashboard: React.FC = () => {
   const { user } = useAuthStore();
   const { isMobileMenuOpen, toggleMobileMenu, closeMobileMenu } = useMobileMenu();
   const view = useMediaView(recentlyAdded);
+  const mainRef = useRef<HTMLElement>(null);
+  useScrollRestoration(mainRef, !isLoading);
 
   useEffect(() => {
     // Wait for user to be loaded
@@ -60,7 +63,7 @@ export const Dashboard: React.FC = () => {
       <Header onMenuClick={toggleMobileMenu} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar isOpen={isMobileMenuOpen} onClose={closeMobileMenu} />
-        <main className="flex-1 p-4 md:p-8 overflow-y-auto">
+        <main ref={mainRef} className="flex-1 p-4 md:p-8 overflow-y-auto">
           <div className="max-w-7xl mx-auto">
             <h2 className="text-2xl md:text-3xl font-bold mb-4 md:mb-6">Home</h2>
 

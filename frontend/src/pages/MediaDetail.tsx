@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useLocation } from 'react-router-dom';
+import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
 import { api, getSelectedServerId } from '../services/api';
@@ -12,6 +12,13 @@ import { refreshConversions } from '../stores/conversionsStore';
 export const MediaDetail: React.FC = () => {
   const { ratingKey } = useParams<{ ratingKey: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
+  // Back to wherever we came from (the library/category/search at its prior
+  // scroll). Fall back to home for a direct deep-link with no history.
+  const goBack = () => {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/');
+  };
   const navState = location.state as
     | { availability?: SourceRef[]; preferredServerId?: string }
     | null;
@@ -303,7 +310,14 @@ export const MediaDetail: React.FC = () => {
       <Header onMenuClick={toggleMobileMenu} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar isOpen={isMobileMenuOpen} onClose={closeMobileMenu} />
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto relative">
+          <button
+            onClick={goBack}
+            className="absolute top-3 left-3 z-20 flex items-center gap-1 bg-dark/70 hover:bg-dark text-white rounded-full pl-2 pr-3 py-1.5 text-sm backdrop-blur transition-colors"
+            title="Back"
+          >
+            ← Back
+          </button>
           {/* Backdrop */}
           {backdropUrl && (
             <div
