@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
-import { api, TranscodeJobView } from '../services/api';
+import { api, TranscodeJobView, ArchiveJobView } from '../services/api';
 
 interface ConversionsState {
   jobs: TranscodeJobView[];
+  archives: ArchiveJobView[];
   activeCount: number;
   loaded: boolean;
   refresh: () => Promise<void>;
@@ -11,12 +12,18 @@ interface ConversionsState {
 
 export const useConversionsStore = create<ConversionsState>((set) => ({
   jobs: [],
+  archives: [],
   activeCount: 0,
   loaded: false,
   refresh: async () => {
     try {
-      const { jobs, activeCount } = await api.getTranscodeJobs();
-      set({ jobs, activeCount, loaded: true });
+      const [{ jobs, activeCount }, archives] = await Promise.all([
+        api.getTranscodeJobs(),
+        api.getArchives().catch(() => [] as ArchiveJobView[]),
+      ]);
+      // Count building archives as active too so the poller speeds up.
+      const building = archives.filter((a) => a.status === 'processing').length;
+      set({ jobs, archives, activeCount: activeCount + building, loaded: true });
     } catch {
       // transient; keep last known state
     }

@@ -13,6 +13,7 @@ import { createServersRouter } from './routes/servers';
 import { createSettingsRouter } from './routes/settings';
 import { createLogsRouter } from './routes/logs';
 import { TranscodeService } from './services/transcodeService';
+import { ArchiveService } from './services/archiveService';
 
 // Initialize database
 const db = new DatabaseService(config.database.path);
@@ -22,11 +23,16 @@ const db = new DatabaseService(config.database.path);
 const transcodeService = new TranscodeService(db);
 transcodeService.recoverOnStartup();
 
-// Cleanup expired sessions, download tokens, and aged transcode files hourly
+// Multi-select zip archives (built from finished conversions)
+const archiveService = new ArchiveService(db);
+archiveService.recoverOnStartup();
+
+// Cleanup expired sessions, download tokens, and aged transcode/archive files hourly
 setInterval(() => {
   db.cleanupExpiredSessions();
   db.cleanupExpiredDownloadTokens();
   transcodeService.cleanupExpired();
+  archiveService.cleanupExpired();
 }, 60 * 60 * 1000);
 
 // Create Express app
@@ -57,7 +63,7 @@ app.get('/api/health', (_req, res) => {
 // Routes
 app.use('/api/auth', createAuthRouter(db));
 app.use('/api/libraries', createLibrariesRouter(db));
-app.use('/api/media', createMediaRouter(db, transcodeService));
+app.use('/api/media', createMediaRouter(db, transcodeService, archiveService));
 app.use('/api/servers', createServersRouter(db));
 app.use('/api/settings', createSettingsRouter(db));
 app.use('/api/logs', createLogsRouter(db));

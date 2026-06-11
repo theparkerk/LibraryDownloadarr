@@ -28,6 +28,18 @@ export interface TranscodeJobView {
   queuePosition?: number;
 }
 
+export interface ArchiveJobView {
+  id: string;
+  title: string;
+  status: 'processing' | 'ready' | 'failed';
+  progress: number;
+  fileSize?: number;
+  sourceCount: number;
+  autoDelete: boolean;
+  error?: string;
+  createdAt: number;
+}
+
 // Which Plex server the UI is browsing. 'home' (or unset) = the
 // admin-configured server; anything else is a plex.tv machine id the
 // backend verifies against the user's own account.
@@ -313,6 +325,32 @@ class ApiClient {
       `/media/transcode/${jobId}/download-token`
     );
     return response.data;
+  }
+
+  async deleteConversion(jobId: string): Promise<void> {
+    await this.client.delete(`/media/transcode/${jobId}`);
+  }
+
+  // ---- Multi-select zip archives ----
+  async createArchive(jobIds: string[], autoDelete: boolean): Promise<{ jobId: string }> {
+    const response = await this.client.post<{ jobId: string }>('/media/archive', { jobIds, autoDelete });
+    return response.data;
+  }
+
+  async getArchives(): Promise<ArchiveJobView[]> {
+    const response = await this.client.get<{ jobs: ArchiveJobView[] }>('/media/archive/jobs');
+    return response.data.jobs;
+  }
+
+  async archiveDownloadUrl(id: string): Promise<{ url: string; expiresAt: number }> {
+    const response = await this.client.post<{ url: string; expiresAt: number }>(
+      `/media/archive/${id}/download-token`
+    );
+    return response.data;
+  }
+
+  async deleteArchive(id: string): Promise<void> {
+    await this.client.delete(`/media/archive/${id}`);
   }
 
   async getSeasonSize(

@@ -4,6 +4,7 @@ import { createPlexClient } from '../services/plexService';
 import { resolveServer, ServerContext } from '../services/serverRegistry';
 import { searchAllServers, getRecentlyAddedAllServers } from '../services/crossServerService';
 import { TranscodeService } from '../services/transcodeService';
+import { ArchiveService } from '../services/archiveService';
 import { getPreset } from '../services/transcodePresets';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -65,7 +66,7 @@ const pickEnglishTextSubtitle = (metadata: any): string | undefined => {
   return candidates[0]?.id;
 };
 
-export const createMediaRouter = (db: DatabaseService, transcodeService: TranscodeService) => {
+export const createMediaRouter = (db: DatabaseService, transcodeService: TranscodeService, archiveService: ArchiveService) => {
   const router = Router();
   const authMiddleware = createAuthMiddleware(db);
 
@@ -700,6 +701,196 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
       return;
     } catch (error) {
       logger.error('Transcode download failed', { error });
+      if (!res.headersSent) return res.status(500).json({ error: 'Download failed' });
+      return;
+    }
+  });
+
+  // Delete a finished/failed conversion + its file (manual space cleanup).
+  // Use cancel for queued/processing jobs instead.
+  router.delete('/transcode/:jobId', authMiddleware, async (req: AuthRequest, res) => {
+    const job = db.getTranscodeJob(req.params.jobId);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    if (job.status === 'queued' || job.status === 'processing') {
+      return res.status(409).json({ error: 'Cancel the conversion before deleting it' });
+    }
+    if (job.outputPath) { try { fs.unlinkSync(job.outputPath); } catch { /* already gone */ } }
+    db.deleteTranscodeJob(job.id);
+    return res.json({ ok: true });
+  });
+
+  // ---- Multi-select downloads: a pre-built .zip of finished conversions ----
+
+  // Build a zip of several ready conversions (owner-scoped). Returns a jobId
+  // the client polls; the zip is served resumably once ready.
+  router.post('/archive', authMiddleware, async (req: AuthRequest, res) => {
+    const { jobIds, autoDelete } = req.body || {};
+    if (!Array.isArray(jobIds) || jobIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one conversion' });
+    }
+    if (jobIds.length > 50) {
+      return res.status(400).json({ error: 'Too many items (max 50)' });
+    }
+
+    const sources: { path: string; name: string }[] = [];
+    for (const jid of jobIds) {
+      const job = db.getTranscodeJob(String(jid));
+      if (!job || job.userId !== req.user!.id) continue;
+      if (job.status !== 'ready' || !job.outputPath || !fs.existsSync(job.outputPath)) continue;
+      const safe = (job.title || 'download').replace(/[\\/:*?"<>|]+/g, '_');
+      sources.push({ path: job.outputPath, name: `${safe} (${job.quality}).mp4` });
+    }
+    if (sources.length === 0) {
+      return res.status(409).json({ error: 'None of the selected conversions are ready' });
+    }
+
+    // De-dupe filenames inside the zip so two same-titled files don't collide.
+    const seen = new Map<string, number>();
+    for (const s of sources) {
+      const n = seen.get(s.name) || 0;
+      if (n > 0) {
+        const dot = s.name.lastIndexOf('.');
+        s.name = dot > 0 ? `${s.name.slice(0, dot)} (${n})${s.name.slice(dot)}` : `${s.name} (${n})`;
+      }
+      seen.set(s.name, n + 1);
+    }
+
+    const title = sources.length === 1
+      ? sources[0].name.replace(/\.mp4$/i, '')
+      : `${sources.length} downloads`;
+    const job = db.createArchiveJob({
+      userId: req.user!.id,
+      title,
+      sourceCount: sources.length,
+      autoDelete: !!autoDelete,
+    });
+    archiveService.start(job.id, sources);
+    return res.json({ jobId: job.id });
+  });
+
+  router.get('/archive/jobs', authMiddleware, (req: AuthRequest, res) => {
+    const jobs = db.getRecentArchiveJobs(req.user!.id, 25).map((j) => ({
+      id: j.id,
+      title: j.title,
+      status: j.status,
+      progress: j.progress,
+      fileSize: j.fileSize,
+      sourceCount: j.sourceCount,
+      autoDelete: j.autoDelete,
+      error: j.error,
+      createdAt: j.createdAt,
+    }));
+    return res.json({ jobs });
+  });
+
+  router.post('/archive/:id/download-token', authMiddleware, (req: AuthRequest, res) => {
+    const job = db.getArchiveJob(req.params.id);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Archive not found' });
+    }
+    if (job.status !== 'ready') {
+      return res.status(409).json({ error: 'Archive is not ready yet' });
+    }
+    const dt = db.createDownloadToken(req.user!.id, 'archive', job.id);
+    return res.json({
+      url: `/api/media/archive/${encodeURIComponent(job.id)}/download?dl=${dt.token}`,
+      expiresAt: dt.expiresAt,
+    });
+  });
+
+  router.delete('/archive/:id', authMiddleware, (req: AuthRequest, res) => {
+    const job = db.getArchiveJob(req.params.id);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Archive not found' });
+    }
+    if (job.outputPath) { try { fs.unlinkSync(job.outputPath); } catch { /* already gone */ } }
+    db.deleteArchiveJob(job.id);
+    return res.json({ ok: true });
+  });
+
+  router.get('/archive/:id', authMiddleware, (req: AuthRequest, res) => {
+    const job = db.getArchiveJob(req.params.id);
+    if (!job || job.userId !== req.user!.id) {
+      return res.status(404).json({ error: 'Archive not found' });
+    }
+    return res.json({ job: { id: job.id, status: job.status, progress: job.progress, title: job.title, fileSize: job.fileSize, error: job.error } });
+  });
+
+  // Stream the finished zip with Range/resume. Auth via session Bearer (owner)
+  // OR a scoped ?dl= archive token. Honors auto-delete on full completion.
+  router.get('/archive/:id/download', async (req: AuthRequest, res) => {
+    try {
+      const { id } = req.params;
+      let userId: string | undefined;
+
+      const dl = req.query.dl;
+      if (typeof dl === 'string' && dl.length > 0) {
+        const dt = db.getDownloadToken(dl);
+        if (dt && dt.scopeType === 'archive' && dt.ratingKey === id) userId = dt.userId;
+      } else if (req.headers.authorization?.startsWith('Bearer ')) {
+        const session = db.getSessionByToken(req.headers.authorization.substring(7));
+        if (session) userId = session.userId;
+      }
+      if (!userId) {
+        return res.status(401).json({ error: 'Invalid or expired download link.' });
+      }
+
+      const job = db.getArchiveJob(id);
+      if (!job || job.userId !== userId) {
+        return res.status(404).json({ error: 'Archive not found' });
+      }
+      if (job.status !== 'ready' || !job.outputPath || !fs.existsSync(job.outputPath)) {
+        return res.status(409).json({ error: 'Archive is not ready (it may have expired — rebuild it).' });
+      }
+
+      const size = fs.statSync(job.outputPath).size;
+      const safeTitle = (job.title || 'downloads').replace(/[\\/:*?"<>|]+/g, '_');
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', contentDisposition(`${safeTitle}.zip`));
+      res.setHeader('Accept-Ranges', 'bytes');
+
+      let servedFull = true; // true unless a partial range is requested
+      const range = req.headers.range;
+      const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (rangeMatch) {
+        let start: number;
+        let end: number;
+        if (rangeMatch[1] === '' && rangeMatch[2] !== '') {
+          const n = parseInt(rangeMatch[2], 10);
+          start = Math.max(0, size - n);
+          end = size - 1;
+        } else {
+          start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0;
+          end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : size - 1;
+        }
+        if (start >= size || end >= size || start > end) {
+          res.setHeader('Content-Range', `bytes */${size}`);
+          return res.status(416).end();
+        }
+        servedFull = start === 0 && end === size - 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+        res.setHeader('Content-Length', end - start + 1);
+        fs.createReadStream(job.outputPath, { start, end }).pipe(res);
+      } else {
+        res.setHeader('Content-Length', size);
+        fs.createReadStream(job.outputPath).pipe(res);
+      }
+
+      // Auto-delete only after a clean, complete transfer (whole file in one
+      // response) so we never delete a file mid multi-range download.
+      res.on('finish', () => {
+        if (servedFull && job.autoDelete) {
+          if (job.outputPath) { try { fs.unlinkSync(job.outputPath); } catch {} }
+          db.deleteArchiveJob(job.id);
+          logger.info(`Auto-deleted archive ${job.id} after download`);
+        }
+      });
+      return;
+    } catch (error) {
+      logger.error('Archive download failed', { error });
       if (!res.headersSent) return res.status(500).json({ error: 'Download failed' });
       return;
     }

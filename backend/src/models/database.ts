@@ -47,7 +47,24 @@ export interface Settings {
 
 // 'transcode' tokens authorize the headerless download of a finished
 // transcode job's temp file; ratingKey holds the jobId in that case.
-export type DownloadScopeType = 'file' | 'season' | 'album' | 'transcode';
+export type DownloadScopeType = 'file' | 'season' | 'album' | 'transcode' | 'archive';
+
+export type ArchiveJobStatus = 'processing' | 'ready' | 'failed';
+
+export interface ArchiveJob {
+  id: string;
+  userId: string;
+  title: string;
+  status: ArchiveJobStatus;
+  progress: number; // 0..100
+  outputPath?: string;
+  fileSize?: number;
+  sourceCount: number;
+  autoDelete: boolean; // delete the zip after a successful full download
+  error?: string;
+  createdAt: number;
+  readyAt?: number;
+}
 
 export interface DownloadToken {
   id: string;
@@ -274,6 +291,25 @@ export class DatabaseService {
         this.db.exec(ddl);
       }
     }
+
+    // Multi-select downloads: a pre-built .zip of several finished conversions,
+    // served resumably like a single conversion.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS archive_jobs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        output_path TEXT,
+        file_size INTEGER,
+        source_count INTEGER NOT NULL DEFAULT 0,
+        auto_delete INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        ready_at INTEGER
+      )
+    `);
 
     logger.info('Database tables initialized');
   }
@@ -635,6 +671,77 @@ export class DatabaseService {
 
   deleteTranscodeJob(id: string): void {
     this.db.prepare('DELETE FROM transcode_jobs WHERE id = ?').run(id);
+  }
+
+  // ---- Archive (multi-select zip) jobs ----
+  private mapArchiveJob(r: any): ArchiveJob {
+    return {
+      id: r.id,
+      userId: r.user_id,
+      title: r.title,
+      status: r.status,
+      progress: r.progress,
+      outputPath: r.output_path ?? undefined,
+      fileSize: r.file_size ?? undefined,
+      sourceCount: r.source_count,
+      autoDelete: !!r.auto_delete,
+      error: r.error ?? undefined,
+      createdAt: r.created_at,
+      readyAt: r.ready_at ?? undefined,
+    };
+  }
+
+  createArchiveJob(opts: { userId: string; title: string; sourceCount: number; autoDelete: boolean }): ArchiveJob {
+    const id = this.generateId();
+    const createdAt = Date.now();
+    this.db.prepare(`
+      INSERT INTO archive_jobs (id, user_id, title, status, progress, source_count, auto_delete, created_at)
+      VALUES (?, ?, ?, 'processing', 0, ?, ?, ?)
+    `).run(id, opts.userId, opts.title, opts.sourceCount, opts.autoDelete ? 1 : 0, createdAt);
+    return { id, userId: opts.userId, title: opts.title, status: 'processing', progress: 0, sourceCount: opts.sourceCount, autoDelete: opts.autoDelete, createdAt };
+  }
+
+  getArchiveJob(id: string): ArchiveJob | undefined {
+    const row = this.db.prepare('SELECT * FROM archive_jobs WHERE id = ?').get(id) as any;
+    return row ? this.mapArchiveJob(row) : undefined;
+  }
+
+  getRecentArchiveJobs(userId: string, limit: number = 25): ArchiveJob[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM archive_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(userId, limit) as any[];
+    return rows.map((r) => this.mapArchiveJob(r));
+  }
+
+  updateArchiveJobProgress(id: string, progress: number): void {
+    this.db.prepare('UPDATE archive_jobs SET progress = ? WHERE id = ?').run(Math.round(progress), id);
+  }
+
+  setArchiveJobReady(id: string, outputPath: string, fileSize: number): void {
+    this.db.prepare(
+      "UPDATE archive_jobs SET status = 'ready', progress = 100, output_path = ?, file_size = ?, ready_at = ? WHERE id = ?"
+    ).run(outputPath, fileSize, Date.now(), id);
+  }
+
+  setArchiveJobFailed(id: string, error: string): void {
+    this.db.prepare("UPDATE archive_jobs SET status = 'failed', error = ? WHERE id = ?").run(error, id);
+  }
+
+  getProcessingArchiveJobs(): ArchiveJob[] {
+    const rows = this.db.prepare("SELECT * FROM archive_jobs WHERE status = 'processing'").all() as any[];
+    return rows.map((r) => this.mapArchiveJob(r));
+  }
+
+  getExpiredArchiveJobs(maxAgeMs: number): ArchiveJob[] {
+    const cutoff = Date.now() - maxAgeMs;
+    const rows = this.db.prepare(
+      "SELECT * FROM archive_jobs WHERE status = 'ready' AND ready_at IS NOT NULL AND ready_at < ?"
+    ).all(cutoff) as any[];
+    return rows.map((r) => this.mapArchiveJob(r));
+  }
+
+  deleteArchiveJob(id: string): void {
+    this.db.prepare('DELETE FROM archive_jobs WHERE id = ?').run(id);
   }
 
   getDownloadHistory(userId: string, limit: number = 50): any[] {
