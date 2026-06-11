@@ -10,12 +10,16 @@ interface MediaCardProps {
 }
 
 export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'grid' }) => {
+  // For a lone episode, show the series poster, not the episode still.
+  const thumbPath =
+    media.type === 'episode' && media.grandparentThumb ? media.grandparentThumb : media.thumb;
   // In All-Servers mode the thumb belongs to the preferred source server
-  const thumbnailUrl = media.thumb
-    ? api.getThumbnailUrl(media.ratingKey, media.thumb, media._preferredServerId)
+  const thumbnailUrl = thumbPath
+    ? api.getThumbnailUrl(media.ratingKey, thumbPath, media._preferredServerId)
     : null;
   const serverCount = media.availability?.length ?? 0;
   const multiServer = serverCount > 1;
+  const newCount = media.newEpisodeCount || 0;
 
   // Format display info based on media type
   const getDisplayInfo = () => {
@@ -81,6 +85,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'gr
             {meta && <span>{meta}</span>}
             {media.contentRating && <span>· {media.contentRating}</span>}
             <span className="capitalize">· {media.type}</span>
+            {newCount > 0 && <span className="text-primary-400">· {newCount} new</span>}
             {multiServer && <span className="text-primary-400">· on {serverCount} servers</span>}
           </div>
         </div>
@@ -114,6 +119,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({ media, onClick, mode = 'gr
         {multiServer && (
           <span className="absolute top-2 left-2 bg-primary-500/90 text-white text-xs rounded px-1.5 py-0.5 z-10">
             {serverCount} servers
+          </span>
+        )}
+
+        {newCount > 0 && (
+          <span className="absolute top-2 right-2 bg-primary-500/90 text-white text-xs rounded px-1.5 py-0.5 z-10">
+            {newCount} new
           </span>
         )}
 

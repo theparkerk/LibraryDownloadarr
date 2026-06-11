@@ -295,8 +295,8 @@ export const MediaDetail: React.FC = () => {
     );
   }
 
-  const posterUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb, srcServerId) : null;
-  const backdropUrl = media.art ? api.getThumbnailUrl(media.ratingKey, media.art, srcServerId) : null;
+  const posterUrl = media.thumb ? api.getThumbnailUrl(media.ratingKey, media.thumb, srcServerId, { w: 400, h: 600 }) : null;
+  const backdropUrl = media.art ? api.getThumbnailUrl(media.ratingKey, media.art, srcServerId, { w: 1280, h: 720 }) : null;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -474,7 +474,7 @@ export const MediaDetail: React.FC = () => {
                               <div className="flex items-center space-x-3 min-w-0 flex-1">
                                 {episode.thumb && (
                                   <img
-                                    src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId)}
+                                    src={api.getThumbnailUrl(episode.ratingKey, episode.thumb, srcServerId, { w: 240, h: 135 })}
                                     alt={episode.title}
                                     className="w-20 h-12 md:w-24 md:h-16 object-cover rounded"
                                   />
@@ -525,7 +525,7 @@ export const MediaDetail: React.FC = () => {
                                 >
                                   {season.thumb && (
                                     <img
-                                      src={api.getThumbnailUrl(season.ratingKey, season.thumb, srcServerId)}
+                                      src={api.getThumbnailUrl(season.ratingKey, season.thumb, srcServerId, { w: 200, h: 300 })}
                                       alt={season.title}
                                       className="w-12 h-18 md:w-16 md:h-24 object-cover rounded"
                                     />

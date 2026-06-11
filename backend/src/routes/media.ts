@@ -13,6 +13,7 @@ import contentDisposition from 'content-disposition';
 import https from 'https';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { createZipStream, ZipFileEntry } from '../utils/zipUtils';
 
 // HTTPS agent that bypasses SSL certificate validation for local Plex servers
@@ -1342,9 +1343,11 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
   // Support both Authorization header and query parameter token for image requests
   router.get('/thumb/:ratingKey', async (req: AuthRequest, res) => {
     try {
-      const { path, token } = req.query;
+      // Note: destructure as `thumbPath` — a bare `path` would shadow the
+      // imported `path` module used for the cache dir below.
+      const { path: thumbPath, token } = req.query;
 
-      if (!path || typeof path !== 'string') {
+      if (!thumbPath || typeof thumbPath !== 'string') {
         return res.status(400).json({ error: 'Thumbnail path is required' });
       }
 
@@ -1393,7 +1396,32 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
       }
 
       const plex = createPlexClient(serverUrl);
-      const thumbUrl = plex.getThumbnailUrl(path, plexToken);
+
+      // Card-sized thumbnails by default; callers (detail poster/backdrop)
+      // can request larger via ?w&h. Clamp to sane bounds.
+      const clampDim = (v: any, def: number) => {
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) ? Math.min(2000, Math.max(16, n)) : def;
+      };
+      const width = clampDim(req.query.w, 300);
+      const height = clampDim(req.query.h, 450);
+
+      // On-disk cache (internal SSD, persisted with the data volume) keyed by
+      // server+path+size, so every family member and every cold browser cache
+      // skips the Plex round-trip after the first fetch.
+      const CACHE_DIR = path.join(path.dirname(config.database.path), 'img-cache');
+      const cacheKey = crypto.createHash('sha1').update(`${serverUrl}|${thumbPath}|${width}x${height}`).digest('hex');
+      const cacheFile = path.join(CACHE_DIR, `${cacheKey}.jpg`);
+      const CACHE_HEADER = 'public, max-age=604800, immutable';
+
+      if (fs.existsSync(cacheFile)) {
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', CACHE_HEADER);
+        fs.createReadStream(cacheFile).pipe(res);
+        return;
+      }
+
+      const thumbUrl = plex.getThumbnailUrl(thumbPath, plexToken, { width, height });
       const response = await axios({
         method: 'GET',
         url: thumbUrl,
@@ -1402,10 +1430,18 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
       });
 
       res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
-      if (response.headers['content-length']) {
-        res.setHeader('Content-Length', response.headers['content-length']);
-      }
+      res.setHeader('Cache-Control', CACHE_HEADER);
 
+      // Tee the resized image to the response and to a temp file; rename on
+      // success so an aborted fetch never leaves a truncated cached image.
+      try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {}
+      const tmp = `${cacheFile}.${process.pid}.tmp`;
+      const out = fs.createWriteStream(tmp);
+      const cleanupTmp = () => { try { fs.unlinkSync(tmp); } catch {} };
+      out.on('finish', () => { try { fs.renameSync(tmp, cacheFile); } catch {} });
+      out.on('error', cleanupTmp);
+      response.data.on('error', () => { cleanupTmp(); try { res.destroy(); } catch {} });
+      response.data.pipe(out);
       response.data.pipe(res);
       return;
     } catch (error) {

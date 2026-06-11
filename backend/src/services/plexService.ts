@@ -50,10 +50,14 @@ export interface PlexMedia {
   librarySectionID?: string;
   librarySectionTitle?: string;
   grandparentTitle?: string;
+  grandparentThumb?: string;
+  grandparentRatingKey?: string;
   parentTitle?: string;
+  parentThumb?: string;
   index?: number;
   parentIndex?: number;
   parentRatingKey?: string;
+  newEpisodeCount?: number; // set when episodes are grouped into a show card
   allowSync?: boolean | number | string; // Download permission: false/0/'0' means download disabled
   Media?: Array<{
     id: number;
@@ -784,12 +788,39 @@ export class PlexService {
         }
       }
 
-      // Keep all fetched items (each library's newest `itemsPerLibrary`),
-      // date-sorted — no global slice that would starve less-frequently-added
-      // types like movies. Bounded by itemsPerLibrary × libraryCount.
-      const sorted = allMedia
-        .filter(m => m.addedAt)
-        .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      // Collapse episodes into one card per show (like Plex's own Recently
+      // Added) so a season drop doesn't bury everything else, and use the
+      // show poster instead of episode stills. Movies/others pass through.
+      const grouped: PlexMedia[] = [];
+      const showByKey = new Map<string, PlexMedia>();
+      for (const m of allMedia) {
+        if (!m.addedAt) continue;
+        if (m.type === 'episode' && m.grandparentRatingKey) {
+          let show = showByKey.get(m.grandparentRatingKey);
+          if (!show) {
+            show = {
+              ratingKey: m.grandparentRatingKey,
+              key: `/library/metadata/${m.grandparentRatingKey}`,
+              title: m.grandparentTitle || 'Unknown Show',
+              type: 'show',
+              thumb: m.grandparentThumb || m.parentThumb || m.thumb,
+              art: m.art,
+              addedAt: m.addedAt,
+              librarySectionID: m.librarySectionID,
+              librarySectionTitle: m.librarySectionTitle,
+              allowSync: m.allowSync,
+              newEpisodeCount: 0,
+            } as PlexMedia;
+            showByKey.set(m.grandparentRatingKey, show);
+            grouped.push(show);
+          }
+          show.newEpisodeCount = (show.newEpisodeCount || 0) + 1;
+          show.addedAt = Math.max(show.addedAt || 0, m.addedAt || 0);
+        } else {
+          grouped.push(m);
+        }
+      }
+      const sorted = grouped.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
 
       logger.debug('Recently added query completed', {
         requestedLimit: limit,
@@ -817,10 +848,25 @@ export class PlexService {
     return `${baseUrl}${partKey}?download=1&X-Plex-Token=${token}`;
   }
 
-  getThumbnailUrl(thumbPath: string, token: string): string {
+  getThumbnailUrl(thumbPath: string, token: string, opts?: { width?: number; height?: number }): string {
     const baseUrl = this.plexUrl;
     if (!baseUrl || !thumbPath) {
       return '';
+    }
+
+    // When a size is requested, go through Plex's photo transcoder so it
+    // serves a small (~20-40 KB) JPEG instead of the full multi-MB poster —
+    // the single biggest win for grid load time. Plex caches these itself.
+    if (opts?.width && opts?.height) {
+      const params = new URLSearchParams({
+        width: String(opts.width),
+        height: String(opts.height),
+        minSize: '1',
+        upscale: '1',
+        url: thumbPath,
+        'X-Plex-Token': token,
+      });
+      return `${baseUrl}/photo/:/transcode?${params.toString()}`;
     }
 
     return `${baseUrl}${thumbPath}?X-Plex-Token=${token}`;

@@ -64,9 +64,13 @@ export interface MediaItem {
   leafCount?: number;
   // Episode/Season/Track context fields
   grandparentTitle?: string; // Show name for episodes, Artist for tracks
+  grandparentThumb?: string; // Show poster for episodes
+  grandparentRatingKey?: string; // Show ratingKey for episodes
   parentTitle?: string; // Season name for episodes, Album for tracks
+  parentThumb?: string; // Season poster for episodes
   index?: number; // Episode number or Track number
   parentIndex?: number; // Season number
+  newEpisodeCount?: number; // set on grouped "show" cards in Recently Added
   Media?: MediaPart[];
   // All-Servers mode only: which servers have this title + the preferred
   // download source (the ratingKey/thumb above resolve against it)

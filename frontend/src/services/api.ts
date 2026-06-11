@@ -339,7 +339,7 @@ class ApiClient {
 
   // serverId override is required for merged ('all'-mode) items, whose thumb
   // lives on the preferred source server, not the 'all' selection.
-  getThumbnailUrl(ratingKey: string, path: string, serverId?: string): string {
+  getThumbnailUrl(ratingKey: string, path: string, serverId?: string, size?: { w: number; h: number }): string {
     const token = localStorage.getItem('token');
     const effective = serverId ?? getSelectedServerId();
     // 'all' is not a real server — a thumb must come from a concrete one
@@ -347,7 +347,10 @@ class ApiClient {
       effective && effective !== 'home' && effective !== 'all'
         ? `&serverId=${encodeURIComponent(effective)}`
         : '';
-    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}${serverParam}`;
+    // Default to card-poster size so the proxy serves a small JPEG (~30 KB)
+    // instead of the full poster. Callers override for larger detail art.
+    const { w, h } = size ?? { w: 300, h: 450 };
+    return `/api/media/thumb/${ratingKey}?path=${encodeURIComponent(path)}&token=${token}&w=${w}&h=${h}${serverParam}`;
   }
 
   // Settings endpoints
