@@ -60,14 +60,35 @@ export class ArchiveService {
     logger.info(`Archive ${id} ready (${(size / 1073741824).toFixed(2)} GB, ${sources.length} files)`);
   }
 
+  private queue: { id: string; sources: ArchiveSource[] }[] = [];
+  private running = false;
+
   // Fire-and-forget: the route responds immediately with the job id and the
-  // client polls for progress.
+  // client polls for progress. Builds are SERIALIZED — two concurrent zip
+  // builds reading + writing the same drive thrash it to a near-standstill
+  // (~KB/s), so each waits its turn instead.
   start(id: string, sources: ArchiveSource[]): void {
-    this.build(id, sources).catch((e) => {
-      logger.error('Archive build failed', { id, error: e?.message });
-      try { fs.unlinkSync(this.outPathFor(id)); } catch {}
-      this.db.setArchiveJobFailed(id, e?.message || 'Archive build failed');
-    });
+    this.queue.push({ id, sources });
+    void this.drain();
+  }
+
+  private async drain(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      while (this.queue.length) {
+        const next = this.queue.shift()!;
+        try {
+          await this.build(next.id, next.sources);
+        } catch (e: any) {
+          logger.error('Archive build failed', { id: next.id, error: e?.message });
+          try { fs.unlinkSync(this.outPathFor(next.id)); } catch {}
+          this.db.setArchiveJobFailed(next.id, e?.message || 'Archive build failed');
+        }
+      }
+    } finally {
+      this.running = false;
+    }
   }
 
   // A build that was mid-flight when the process died can't resume — fail it

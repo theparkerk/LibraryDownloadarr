@@ -665,15 +665,23 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         return res.status(409).json({ error: 'Conversion is not ready (it may have expired — start it again).' });
       }
 
-      const size = fs.statSync(job.outputPath).size;
+      const stat = fs.statSync(job.outputPath);
+      const size = stat.size;
+      // ETag + Last-Modified + If-Range let iOS Safari RESUME a failed
+      // download instead of only restarting it.
+      const etag = `"${size}-${Math.floor(stat.mtimeMs)}"`;
       const safeTitle = (job.title || 'download').replace(/[\\/:*?"<>|]+/g, '_');
       const filename = `${safeTitle} (${job.quality}).mp4`;
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Content-Disposition', contentDisposition(filename));
       res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('ETag', etag);
+      res.setHeader('Last-Modified', stat.mtime.toUTCString());
 
+      const ifRange = req.headers['if-range'];
+      const validatorOk = !ifRange || ifRange === etag || ifRange === stat.mtime.toUTCString();
       const range = req.headers.range;
-      const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      const rangeMatch = validatorOk && range ? /^bytes=(\d*)-(\d*)$/.exec(range) : null;
       if (rangeMatch) {
         let start: number;
         let end: number;
@@ -845,15 +853,25 @@ export const createMediaRouter = (db: DatabaseService, transcodeService: Transco
         return res.status(409).json({ error: 'Archive is not ready (it may have expired — rebuild it).' });
       }
 
-      const size = fs.statSync(job.outputPath).size;
+      const stat = fs.statSync(job.outputPath);
+      const size = stat.size;
+      // ETag + Last-Modified + If-Range are what iOS Safari needs to RESUME a
+      // failed download (with just Accept-Ranges it can only restart).
+      const etag = `"${size}-${Math.floor(stat.mtimeMs)}"`;
       const safeTitle = (job.title || 'downloads').replace(/[\\/:*?"<>|]+/g, '_');
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', contentDisposition(`${safeTitle}.zip`));
       res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('ETag', etag);
+      res.setHeader('Last-Modified', stat.mtime.toUTCString());
 
+      // Honor the Range only if the client's validator still matches the file
+      // (so a changed file restarts cleanly rather than resuming corrupt).
+      const ifRange = req.headers['if-range'];
+      const validatorOk = !ifRange || ifRange === etag || ifRange === stat.mtime.toUTCString();
       let servedFull = true; // true unless a partial range is requested
       const range = req.headers.range;
-      const rangeMatch = range && /^bytes=(\d*)-(\d*)$/.exec(range);
+      const rangeMatch = validatorOk && range ? /^bytes=(\d*)-(\d*)$/.exec(range) : null;
       if (rangeMatch) {
         let start: number;
         let end: number;
