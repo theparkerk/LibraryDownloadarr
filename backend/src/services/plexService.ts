@@ -224,25 +224,42 @@ export class PlexService {
 
       if (response.data.authToken) {
         let username = response.data.username || response.data.title || response.data.friendlyName;
+        // IMPORTANT: response.data here is the PIN object, whose `id` is the
+        // PIN id — a NEW value every login. Keying users on it fragments one
+        // account into a new row per login (see the 6-row girthfingers bug).
+        // Identify the user by their STABLE plex.tv account uuid/id from
+        // /api/v2/user instead.
+        let accountUuid: string | undefined;
+        let accountId: number | string | undefined;
+        let email: string = response.data.email || '';
 
         try {
           const userInfo = await this.getUserInfo(response.data.authToken);
           username = userInfo.friendlyName || userInfo.friendly_name || userInfo.username || userInfo.title || username;
-          logger.debug('Fetched detailed user info', { username, userInfo });
+          accountUuid = userInfo.uuid != null ? String(userInfo.uuid) : undefined;
+          accountId = userInfo.id;
+          email = userInfo.email || email;
+          logger.debug('Fetched detailed user info', { username, accountUuid, accountId });
         } catch (error) {
           logger.warn('Could not fetch detailed user info, using PIN data', { error });
         }
 
         if (!username) {
-          username = `plexuser_${response.data.id}`;
+          username = `plexuser_${accountId ?? response.data.id}`;
         }
+
+        // Prefer the stable account uuid; fall back to the numeric account id.
+        // Only fall back to the (unstable) PIN id if /api/v2/user was
+        // unreachable — better a working login than none, and re-fragmentation
+        // here is rare and self-corrects on the next successful login.
+        const stableUuid = accountUuid || (accountId != null ? String(accountId) : undefined) || response.data.id?.toString();
 
         return {
           authToken: response.data.authToken,
           user: {
-            id: response.data.id,
-            uuid: response.data.id?.toString(),
-            email: response.data.email || '',
+            id: accountId ?? response.data.id,
+            uuid: stableUuid,
+            email,
             username: username,
             title: response.data.title || username,
             thumb: response.data.thumb || '',
