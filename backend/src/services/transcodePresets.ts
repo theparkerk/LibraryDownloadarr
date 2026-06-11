@@ -21,7 +21,10 @@ export const TRANSCODE_PRESETS: Record<string, TranscodePreset> = {
     id: '1080p',
     label: 'iPad / Mac (1080p)',
     videoResolution: '1920x1080',
-    maxVideoBitrate: 8000,
+    // ~3 GB target for a ~2h movie: 3000k ×1.15 (VideoToolbox bump in
+    // transcodeService) ≈ 3.45 Mbps video + 192k audio ≈ 3 GB. Was 8000k,
+    // which produced a 7.9 GB Tropic Thunder.
+    maxVideoBitrate: 3000,
     videoQuality: 75,
   },
 };
