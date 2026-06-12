@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.parker.lda-drive-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/parkerkelley/Apps/LifeOS/librarydownloadarr/host-tools/lda-drive-watchdog.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- diskutil/pmset/log live in /usr/sbin + /usr/bin; HOME must be set
+             explicitly (launchd does not set it) so the script finds
+             ~/.config/fleet-secrets.env and ~/Library/Logs. -->
+        <key>PATH</key>
+        <string>/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/parkerkelley</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/parkerkelley/Library/Logs/lda-drive-watchdog.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/parkerkelley/Library/Logs/lda-drive-watchdog.err</string>
+</dict>
+</plist>

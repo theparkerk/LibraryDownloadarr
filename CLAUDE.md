@@ -849,3 +849,50 @@ dies — but note KeepAlive does **not** help the TCC hang (the process never
 exits, it just blocks), so a missing FDA grant looks like a wedged helper.
 If the helper is down/blocked, conversions fail via the stall watchdog
 (~5 min) and can be retried.
+
+---
+
+## Media drive watchdog (the USB drive that hosts everything)
+
+The 15TB USB **Media** drive (Plex library at `/Volumes/Media/data/media` + this
+app's transcode cache at `/Volumes/Media/lda-transcode-cache`) dropped off the
+M4's USB bus once (2026-06-11, after 17 days up), which 502'd the portal AND
+Plex. It sits behind a Realtek→VIA→Genesys USB hub chain — a fragile path. macOS
+**cannot re-enumerate a fully-dropped USB device in software** (no `usbreset` on
+Apple Silicon), so the only real recovery for a full drop is a physical
+reconnect/power-cycle. Two defenses:
+
+### Prevention — disable disk spin-down (one-time, needs sudo)
+
+A spun-down drive whose bridge fails to wake is the likely drop trigger. Keep it
+awake so it's never asked to wake:
+
+```bash
+sudo pmset -a disksleep 0   # never spin idle disks down (the key one)
+sudo pmset -c sleep 0        # a 24/7 server on AC should never system-sleep
+```
+
+### Detection + auto-recovery — `lda-drive-watchdog`
+
+`host-tools/lda-drive-watchdog.sh` (launchd, every 120s) checks the drive via the
+**mount table + `diskutil` only** (never reads volume files → needs **no** Full
+Disk Access, unlike the transcode helper). If the volume is unmounted-but-still-
+enumerated it `diskutil mount`s it (no sudo; Owners disabled). If it's fully
+de-enumerated it captures diagnostics to `~/Library/Logs/lda-drive-incident-*.log`
+(before the unified log rolls) and Pushover-alerts (priority 1). Recovery sends a
+normal alert. Identifies the volume by UUID `93C743F8-9A62-4B89-B046-8B0E7D5E80E3`
+(stable across re-enumeration). Pushover creds come from `~/.config/fleet-secrets.env`
+(`PUSHOVER_API_TOKEN` / `PUSHOVER_USER_KEY`).
+
+Install on the M4:
+
+```bash
+cp host-tools/com.parker.lda-drive-watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.parker.lda-drive-watchdog.plist
+bash host-tools/lda-drive-watchdog.sh test    # confirm Pushover fires
+```
+
+Note: if the drive comes back after being gone a while, Docker Desktop may still
+hold a stale `/host_mnt/Volumes/Media` mount (`permission denied` / `file exists`
+on container start) — restart Docker Desktop to clear it, then `docker compose up
+-d` (see the deploy/incident notes).
